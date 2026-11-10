@@ -475,13 +475,15 @@ export default function PanelMedicoPage() {
     setBuscandoPaciente(false);
   }
 
-  useEffect(() => {
-    if (fechaManual && (esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id)) {
-      generarHorariosManuales(esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id, fechaManual);
-    } else {
-      setHorariosManuales([]);
-    }
-  }, [fechaManual, medicoSeleccionadoAdmin]);
+useEffect(() => {
+  const medicoIdTarget = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
+
+  if (fechaManual && medicoIdTarget) {
+    generarHorariosManuales(medicoIdTarget, fechaManual);
+  } else {
+    setHorariosManuales([]);
+  }
+}, [fechaManual, medicoSeleccionadoAdmin, perfilUsuario?.id]);
 
   async function generarHorariosManuales(medicoId: string, fechaStr: string) {
     const dateObj = new Date(fechaStr + 'T00:00:00');
