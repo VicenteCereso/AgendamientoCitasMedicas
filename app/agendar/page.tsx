@@ -50,10 +50,14 @@ function AgendarContenido() {
   const [errorMsg, setErrorMsg] = useState<string>('');
 
   useEffect(() => {
-    cargarMedicos();
-  }, []);
+    cargarMedicosYVerificarSesion();
+  }, [medicoIdParam]);
 
-  async function cargarMedicos() {
+  async function cargarMedicosYVerificarSesion() {
+    // 1. Verificamos si hay una sesión activa en Supabase
+    const { data: { session } } = await supabase.auth.getSession();
+
+    // 2. Cargamos la lista de médicos normalmente
     const { data } = await supabase
       .from('medicos')
       .select('id, nombre, especialidad, direccion, consultorio, rol')
@@ -64,7 +68,8 @@ function AgendarContenido() {
       setMedicos(data);
       setMedicosFiltrados(data);
 
-      if (medicoIdParam) {
+      // 3. SOLO fijamos el médico si viene un parámetro válido por URL y hay sesión activa de médico
+      if (session?.user && medicoIdParam) {
         const encontrado = data.find((m) => m.id === medicoIdParam);
         if (encontrado) {
           setMedicoSeleccionadoObj(encontrado);
@@ -74,6 +79,8 @@ function AgendarContenido() {
           seleccionarMedicoInicial(data[0]);
         }
       } else {
+        // Si se cerró sesión o es un paciente general, liberamos el buscador por completo
+        setMedicoFijo(false);
         seleccionarMedicoInicial(data[0]);
       }
     }
@@ -252,7 +259,6 @@ function AgendarContenido() {
             <strong>{medicoSeleccionadoObj?.nombre}</strong> ({medicoSeleccionadoObj?.especialidad}).
           </p>
 
-          {/* FICHA DE UBICACIÓN Y CONSULTORIO EN EL COMPROBANTE DE RESUMEN */}
           {tipoConsulta === 'presencial' ? (
             <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200 text-left space-y-2">
               <p className="text-xs font-bold text-slate-700 uppercase tracking-wide border-b pb-1">📍 Detalle del Consultorio:</p>
@@ -321,7 +327,7 @@ function AgendarContenido() {
             
             {/* BUSCADOR DE MÉDICOS */}
             <div className="relative">
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-2">1. Selecciona o busca al Médico / Especialidad:</label>
+              <label className="block text-xs font-bold text-slate-700 uppercase mb-2">Selecciona o busca al Médico / Especialidad:</label>
               
               {medicoFijo ? (
                 <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
