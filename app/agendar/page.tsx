@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { EmailService } from '@/services/email.service'; // <--- Importamos el servicio de correo
 
 interface Medico {
   id: string;
@@ -54,10 +55,8 @@ function AgendarContenido() {
   }, [medicoIdParam]);
 
   async function cargarMedicosYVerificarSesion() {
-    // 1. Verificamos si hay una sesión activa en Supabase
     const { data: { session } } = await supabase.auth.getSession();
 
-    // 2. Cargamos la lista de médicos normalmente
     const { data } = await supabase
       .from('medicos')
       .select('id, nombre, especialidad, direccion, consultorio, rol')
@@ -68,7 +67,6 @@ function AgendarContenido() {
       setMedicos(data);
       setMedicosFiltrados(data);
 
-      // 3. SOLO fijamos el médico si viene un parámetro válido por URL y hay sesión activa de médico
       if (session?.user && medicoIdParam) {
         const encontrado = data.find((m) => m.id === medicoIdParam);
         if (encontrado) {
@@ -79,7 +77,6 @@ function AgendarContenido() {
           seleccionarMedicoInicial(data[0]);
         }
       } else {
-        // Si se cerró sesión o es un paciente general, liberamos el buscador por completo
         setMedicoFijo(false);
         seleccionarMedicoInicial(data[0]);
       }
@@ -224,27 +221,44 @@ function AgendarContenido() {
       enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
     }
 
+    // 1. INSERTAR CITA FORZANDO EL ESTADO 'confirmada'
     const { error: errCita } = await supabase.from('citas').insert([
       {
         medico_id: medicoSeleccionadoObj.id,
         paciente_id: pacienteId,
         fecha_hora: fechaHoraISO,
         tipo_consulta: tipoConsulta,
-        estado: 'pendiente',
+        estado: 'confirmada', // <--- Actualizado para que nazca confirmada
         enlace_videollamada: enlaceJitsi,
       },
     ]);
 
-    setLoading(false);
-
     if (errCita) {
       setErrorMsg('Error al agendar la cita: ' + errCita.message);
-    } else {
-      setExito(true);
+      setLoading(false);
+      return;
     }
+
+    // 2. DISPARAR NOTIFICACIÓN POR CORREO SI EL PACIENTE INGRESÓ EMAIL
+    if (emailPaciente.trim()) {
+      try {
+        await EmailService.enviarConfirmacionCita({
+          emailDestino: emailPaciente.trim(),
+          nombrePaciente: nombrePaciente,
+          nombreMedico: medicoSeleccionadoObj.nombre,
+          fechaHora: fechaHoraISO,
+          tipoConsulta: tipoConsulta,
+          enlaceVideollamada: enlaceJitsi || undefined,
+        });
+      } catch (errEmail) {
+        console.error('No se pudo enviar el correo de confirmación automática:', errEmail);
+      }
+    }
+
+    setLoading(false);
+    setExito(true);
   }
 
-  // PANTALLA DE ÉXITO DE AGENDAMIENTO CON DIRECCIÓN Y CONSULTORIO DETALLADOS
   if (exito) {
     const salaUnica = `ConsultaMedica-${medicoSeleccionadoObj?.id.substring(0, 5)}-${fechaSeleccionada}-${horaSeleccionada.replace(':', '')}`;
     const enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
@@ -257,6 +271,7 @@ function AgendarContenido() {
           <p className="text-sm text-slate-600 mb-4">
             Registrada para el día <strong>{fechaSeleccionada}</strong> a las <strong>{horaSeleccionada} hs</strong> con el Dr(a).{' '}
             <strong>{medicoSeleccionadoObj?.nombre}</strong> ({medicoSeleccionadoObj?.especialidad}).
+            {emailPaciente && <span className="block mt-1 text-xs text-blue-600">✉️ Se ha enviado la confirmación a tu correo.</span>}
           </p>
 
           {tipoConsulta === 'presencial' ? (
@@ -325,79 +340,75 @@ function AgendarContenido() {
 
           <form onSubmit={handleSubmit} className="space-y-6">
             
-            {/* BUSCADOR DE MÉDICOS */}
-          <div className="relative">
-            <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
-              1. Selecciona o busca al Médico / Especialidad:
-            </label>
-            
-            {medicoFijo ? (
-              <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
-                  <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
-                  <p className="text-xs text-slate-600 mt-1">📍 {medicoSeleccionadoObj?.direccion} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio}</strong></p>
+            <div className="relative">
+              <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
+                1. Selecciona o busca al Médico / Especialidad:
+              </label>
+              
+              {medicoFijo ? (
+                <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
+                    <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
+                    <p className="text-xs text-slate-600 mt-1">📍 {medicoSeleccionadoObj?.direccion} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio}</strong></p>
+                  </div>
+                  <span className="text-xs font-bold bg-blue-200 text-blue-800 px-2.5 py-1 rounded-full">
+                    Asignado
+                  </span>
                 </div>
-                <span className="text-xs font-bold bg-blue-200 text-blue-800 px-2.5 py-1 rounded-full">
-                  Asignado
-                </span>
-              </div>
-            ) : (
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="🔍 Escribe un nombre o especialidad (ej. Pediatría, Dr. Juan)..."
-                  value={busquedaMedico}
-                  onChange={(e) => handleBuscar(e.target.value)}
-                  onFocus={() => {
-                    if (busquedaMedico.trim() !== '') {
-                      setMostrarDropdown(true);
-                    }
-                  }}
-                  className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
+              ) : (
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="🔍 Escribe un nombre o especialidad (ej. Pediatría, Dr. Juan)..."
+                    value={busquedaMedico}
+                    onChange={(e) => handleBuscar(e.target.value)}
+                    onFocus={() => {
+                      if (busquedaMedico.trim() !== '') {
+                        setMostrarDropdown(true);
+                      }
+                    }}
+                    className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
 
-                {/* LISTA DESPLEGABLE PEGUADA AL INPUT (Solo visible si hay texto escrito) */}
-                {mostrarDropdown && busquedaMedico.trim() !== '' && medicosFiltrados.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-60 overflow-y-auto z-50">
-                    {medicosFiltrados.map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => seleccionarMedico(m)}
-                        className="w-full text-left p-3 hover:bg-blue-50 border-b border-slate-100 last:border-0 transition flex flex-col"
-                      >
-                        <span className="font-bold text-slate-800 text-sm">{m.nombre}</span>
-                        <span className="text-xs text-blue-600 font-medium">{m.especialidad}</span>
-                        <span className="text-[11px] text-slate-500 mt-0.5">
-                          📍 {m.direccion || 'Guayaquil'} | 🏢 {m.consultorio || 'Consultorio N/A'}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* DETALLE DEL LUGAR DE ATENCIÓN DEL MÉDICO SELECCIONADO (Debajo del input) */}
-                {medicoSeleccionadoObj && (
-                  <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
-                    <div>
-                      <span className="text-slate-400 font-semibold uppercase text-[10px] block">
-                        Lugar de Atención Presencial:
-                      </span>
-                      <p className="font-bold text-slate-800 text-xs">
-                        {medicoSeleccionadoObj.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}
-                      </p>
-                      <p className="text-blue-700 font-extrabold mt-0.5">
-                        🏢 {medicoSeleccionadoObj.consultorio || 'Piso 2, Consultorio 204'}
-                      </p>
+                  {mostrarDropdown && busquedaMedico.trim() !== '' && medicosFiltrados.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-60 overflow-y-auto z-50">
+                      {medicosFiltrados.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => seleccionarMedico(m)}
+                          className="w-full text-left p-3 hover:bg-blue-50 border-b border-slate-100 last:border-0 transition flex flex-col"
+                        >
+                          <span className="font-bold text-slate-800 text-sm">{m.nombre}</span>
+                          <span className="text-xs text-blue-600 font-medium">{m.especialidad}</span>
+                          <span className="text-[11px] text-slate-500 mt-0.5">
+                            📍 {m.direccion || 'Guayaquil'} | 🏢 {m.consultorio || 'Consultorio N/A'}
+                          </span>
+                        </button>
+                      ))}
                     </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+                  )}
 
-            {/* FECHA */}
+                  {medicoSeleccionadoObj && (
+                    <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                      <div>
+                        <span className="text-slate-400 font-semibold uppercase text-[10px] block">
+                          Lugar de Atención Presencial:
+                        </span>
+                        <p className="font-bold text-slate-800 text-xs">
+                          {medicoSeleccionadoObj.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}
+                        </p>
+                        <p className="text-blue-700 font-extrabold mt-0.5">
+                          🏢 {medicoSeleccionadoObj.consultorio || 'Piso 2, Consultorio 204'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase mb-2">2. Selecciona la Fecha:</label>
               <input
@@ -412,7 +423,6 @@ function AgendarContenido() {
               />
             </div>
 
-            {/* HORARIOS DISPONIBLES */}
             {fechaSeleccionada && (
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase mb-2">3. Horarios Disponibles:</label>
@@ -441,7 +451,6 @@ function AgendarContenido() {
               </div>
             )}
 
-            {/* DATOS DEL PACIENTE */}
             <div className="border-t pt-6 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase">4. Datos del Paciente:</h3>
 
@@ -497,7 +506,7 @@ function AgendarContenido() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico (Opcional)</label>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico (Para recibir confirmación)</label>
                   <input
                     type="email"
                     placeholder="ejemplo@correo.com"
