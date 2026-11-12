@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { EmailService } from '@/services/email.service';
 
 interface Medico {
   id: string;
@@ -20,6 +21,14 @@ interface Disponibilidad {
   hora_inicio: string;
   hora_fin: string;
   duracion_cita_minutos: number;
+}
+
+interface Paciente {
+  id: string;
+  nombre: string;
+  cedula: string;
+  telefono: string;
+  email?: string;
 }
 
 function AgendarContenido() {
@@ -39,6 +48,12 @@ function AgendarContenido() {
   const [horaSeleccionada, setHoraSeleccionada] = useState<string>('');
 
   const [tipoConsulta, setTipoConsulta] = useState<'presencial' | 'telemedicina'>('presencial');
+  
+  // ESTADOS DE PACIENTE Y BÚSQUEDA INTUITIVA
+  const [busquedaPaciente, setBusquedaPaciente] = useState<string>('');
+  const [sugerenciasPacientes, setSugerenciasPacientes] = useState<Paciente[]>([]);
+  const [pacienteSeleccionadoId, setPacienteSeleccionadoId] = useState<string | null>(null);
+
   const [nombrePaciente, setNombrePaciente] = useState<string>('');
   const [cedulaPaciente, setCedulaPaciente] = useState<string>('');
   const [telefonoPaciente, setTelefonoPaciente] = useState<string>('');
@@ -54,10 +69,8 @@ function AgendarContenido() {
   }, [medicoIdParam]);
 
   async function cargarMedicosYVerificarSesion() {
-    // 1. Verificamos si hay una sesión activa en Supabase
     const { data: { session } } = await supabase.auth.getSession();
 
-    // 2. Cargamos la lista de médicos normalmente
     const { data } = await supabase
       .from('medicos')
       .select('id, nombre, especialidad, direccion, consultorio, rol')
@@ -68,7 +81,6 @@ function AgendarContenido() {
       setMedicos(data);
       setMedicosFiltrados(data);
 
-      // 3. SOLO fijamos el médico si viene un parámetro válido por URL y hay sesión activa de médico
       if (session?.user && medicoIdParam) {
         const encontrado = data.find((m) => m.id === medicoIdParam);
         if (encontrado) {
@@ -79,7 +91,6 @@ function AgendarContenido() {
           seleccionarMedicoInicial(data[0]);
         }
       } else {
-        // Si se cerró sesión o es un paciente general, liberamos el buscador por completo
         setMedicoFijo(false);
         seleccionarMedicoInicial(data[0]);
       }
@@ -91,7 +102,7 @@ function AgendarContenido() {
     setBusquedaMedico(`${med.nombre} — ${med.especialidad}`);
   }
 
-  function handleBuscar(texto: string) {
+  function handleBuscarMedico(texto: string) {
     setBusquedaMedico(texto);
     setMostrarDropdown(true);
 
@@ -108,6 +119,42 @@ function AgendarContenido() {
     setBusquedaMedico(`${med.nombre} — ${med.especialidad}`);
     setMostrarDropdown(false);
     setHoraSeleccionada('');
+  }
+
+  // BÚSQUEDA INTUITIVA DE PACIENTES (POR CÉDULA O NOMBRE)
+  async function handleBuscarPacienteInput(texto: string) {
+    setBusquedaPaciente(texto);
+    if (!texto.trim()) {
+      setSugerenciasPacientes([]);
+      return;
+    }
+
+    const { data } = await supabase
+      .from('pacientes')
+      .select('id, nombre, cedula, telefono, email')
+      .or(`nombre.ilike.%${texto}%,cedula.ilike.%${texto}%`)
+      .limit(5);
+
+    setSugerenciasPacientes(data || []);
+  }
+
+  function seleccionarPacienteExistente(pac: Paciente) {
+    setPacienteSeleccionadoId(pac.id);
+    setNombrePaciente(pac.nombre);
+    setCedulaPaciente(pac.cedula);
+    setTelefonoPaciente(pac.telefono || '');
+    setEmailPaciente(pac.email || '');
+    setBusquedaPaciente(`${pac.nombre} (${pac.cedula})`);
+    setSugerenciasPacientes([]);
+  }
+
+  function limpiarPacienteSeleccionado() {
+    setPacienteSeleccionadoId(null);
+    setBusquedaPaciente('');
+    setNombrePaciente('');
+    setCedulaPaciente('');
+    setTelefonoPaciente('');
+    setEmailPaciente('');
   }
 
   useEffect(() => {
@@ -181,39 +228,53 @@ function AgendarContenido() {
       alert('Por favor selecciona un horario disponible.');
       return;
     }
+    if (!nombrePaciente.trim() || !cedulaPaciente.trim()) {
+      alert('Por favor ingresa el nombre y la cédula del paciente.');
+      return;
+    }
 
     setLoading(true);
     setErrorMsg('');
 
-    let pacienteId = '';
-    const { data: pacienteExistente } = await supabase
-      .from('pacientes')
-      .select('id')
-      .eq('cedula', cedulaPaciente.trim())
-      .single();
+    let pacienteId = pacienteSeleccionadoId;
 
-    if (pacienteExistente) {
-      pacienteId = pacienteExistente.id;
-    } else {
-      const { data: nuevoPaciente, error: errPac } = await supabase
+    if (!pacienteId) {
+      // Verificamos si ya existe por cédula antes de insertar
+      const { data: pacienteExistente } = await supabase
         .from('pacientes')
-        .insert([
-          {
-            nombre: nombrePaciente,
-            cedula: cedulaPaciente.trim(),
-            telefono: telefonoPaciente,
-            email: emailPaciente,
-          },
-        ])
         .select('id')
-        .single();
+        .eq('cedula', cedulaPaciente.trim())
+        .maybeSingle();
 
-      if (errPac || !nuevoPaciente) {
-        setErrorMsg('Error al registrar datos del paciente.');
-        setLoading(false);
-        return;
+      if (pacienteExistente) {
+        pacienteId = pacienteExistente.id;
+        // Actualizamos datos por si hubo cambios
+        await supabase
+          .from('pacientes')
+          .update({ nombre: nombrePaciente, telefono: telefonoPaciente, email: emailPaciente })
+          .eq('id', pacienteId);
+      } else {
+        // Creamos nuevo paciente
+        const { data: nuevoPaciente, error: errPac } = await supabase
+          .from('pacientes')
+          .insert([
+            {
+              nombre: nombrePaciente,
+              cedula: cedulaPaciente.trim(),
+              telefono: telefonoPaciente,
+              email: emailPaciente,
+            },
+          ])
+          .select('id')
+          .single();
+
+        if (errPac || !nuevoPaciente) {
+          setErrorMsg('Error al registrar datos del paciente: ' + (errPac?.message || ''));
+          setLoading(false);
+          return;
+        }
+        pacienteId = nuevoPaciente.id;
       }
-      pacienteId = nuevoPaciente.id;
     }
 
     const fechaHoraISO = `${fechaSeleccionada}T${horaSeleccionada}:00`;
@@ -224,27 +285,44 @@ function AgendarContenido() {
       enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
     }
 
+    // Insertar Cita Confirmada
     const { error: errCita } = await supabase.from('citas').insert([
       {
         medico_id: medicoSeleccionadoObj.id,
         paciente_id: pacienteId,
         fecha_hora: fechaHoraISO,
         tipo_consulta: tipoConsulta,
-        estado: 'pendiente',
+        estado: 'confirmada',
         enlace_videollamada: enlaceJitsi,
       },
     ]);
 
-    setLoading(false);
-
     if (errCita) {
       setErrorMsg('Error al agendar la cita: ' + errCita.message);
-    } else {
-      setExito(true);
+      setLoading(false);
+      return;
     }
+
+    // Disparar correo si ingresó email
+    if (emailPaciente.trim()) {
+      try {
+        await EmailService.enviarConfirmacionCita({
+          emailDestino: emailPaciente.trim(),
+          nombrePaciente: nombrePaciente,
+          nombreMedico: medicoSeleccionadoObj.nombre,
+          fechaHora: fechaHoraISO,
+          tipoConsulta: tipoConsulta,
+          enlaceVideollamada: enlaceJitsi || undefined,
+        });
+      } catch (errEmail) {
+        console.error('No se pudo enviar el correo:', errEmail);
+      }
+    }
+
+    setLoading(false);
+    setExito(true);
   }
 
-  // PANTALLA DE ÉXITO DE AGENDAMIENTO CON DIRECCIÓN Y CONSULTORIO DETALLADOS
   if (exito) {
     const salaUnica = `ConsultaMedica-${medicoSeleccionadoObj?.id.substring(0, 5)}-${fechaSeleccionada}-${horaSeleccionada.replace(':', '')}`;
     const enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
@@ -257,6 +335,7 @@ function AgendarContenido() {
           <p className="text-sm text-slate-600 mb-4">
             Registrada para el día <strong>{fechaSeleccionada}</strong> a las <strong>{horaSeleccionada} hs</strong> con el Dr(a).{' '}
             <strong>{medicoSeleccionadoObj?.nombre}</strong> ({medicoSeleccionadoObj?.especialidad}).
+            {emailPaciente && <span className="block mt-1 text-xs text-blue-600">✉️ Se ha enviado la confirmación a tu correo.</span>}
           </p>
 
           {tipoConsulta === 'presencial' ? (
@@ -290,6 +369,7 @@ function AgendarContenido() {
             onClick={() => {
               setExito(false);
               setHoraSeleccionada('');
+              limpiarPacienteSeleccionado();
             }}
             className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl transition text-sm shadow"
           >
@@ -326,76 +406,74 @@ function AgendarContenido() {
           <form onSubmit={handleSubmit} className="space-y-6">
             
             {/* BUSCADOR DE MÉDICOS */}
-          <div className="relative">
-            <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
-              1. Selecciona o busca al Médico / Especialidad:
-            </label>
-            
-            {medicoFijo ? (
-              <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
-                  <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
-                  <p className="text-xs text-slate-600 mt-1">📍 {medicoSeleccionadoObj?.direccion} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio}</strong></p>
+            <div className="relative">
+              <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
+                1. Selecciona o busca al Médico / Especialidad:
+              </label>
+              
+              {medicoFijo ? (
+                <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
+                    <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
+                    <p className="text-xs text-slate-600 mt-1">📍 {medicoSeleccionadoObj?.direccion} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio}</strong></p>
+                  </div>
+                  <span className="text-xs font-bold bg-blue-200 text-blue-800 px-2.5 py-1 rounded-full">
+                    Asignado
+                  </span>
                 </div>
-                <span className="text-xs font-bold bg-blue-200 text-blue-800 px-2.5 py-1 rounded-full">
-                  Asignado
-                </span>
-              </div>
-            ) : (
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="🔍 Escribe un nombre o especialidad (ej. Pediatría, Dr. Juan)..."
-                  value={busquedaMedico}
-                  onChange={(e) => handleBuscar(e.target.value)}
-                  onFocus={() => {
-                    if (busquedaMedico.trim() !== '') {
-                      setMostrarDropdown(true);
-                    }
-                  }}
-                  className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
+              ) : (
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="🔍 Escribe un nombre o especialidad (ej. Pediatría, Dr. Juan)..."
+                    value={busquedaMedico}
+                    onChange={(e) => handleBuscarMedico(e.target.value)}
+                    onFocus={() => {
+                      if (busquedaMedico.trim() !== '') {
+                        setMostrarDropdown(true);
+                      }
+                    }}
+                    className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
 
-                {/* LISTA DESPLEGABLE PEGUADA AL INPUT (Solo visible si hay texto escrito) */}
-                {mostrarDropdown && busquedaMedico.trim() !== '' && medicosFiltrados.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-60 overflow-y-auto z-50">
-                    {medicosFiltrados.map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => seleccionarMedico(m)}
-                        className="w-full text-left p-3 hover:bg-blue-50 border-b border-slate-100 last:border-0 transition flex flex-col"
-                      >
-                        <span className="font-bold text-slate-800 text-sm">{m.nombre}</span>
-                        <span className="text-xs text-blue-600 font-medium">{m.especialidad}</span>
-                        <span className="text-[11px] text-slate-500 mt-0.5">
-                          📍 {m.direccion || 'Guayaquil'} | 🏢 {m.consultorio || 'Consultorio N/A'}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* DETALLE DEL LUGAR DE ATENCIÓN DEL MÉDICO SELECCIONADO (Debajo del input) */}
-                {medicoSeleccionadoObj && (
-                  <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
-                    <div>
-                      <span className="text-slate-400 font-semibold uppercase text-[10px] block">
-                        Lugar de Atención Presencial:
-                      </span>
-                      <p className="font-bold text-slate-800 text-xs">
-                        {medicoSeleccionadoObj.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}
-                      </p>
-                      <p className="text-blue-700 font-extrabold mt-0.5">
-                        🏢 {medicoSeleccionadoObj.consultorio || 'Piso 2, Consultorio 204'}
-                      </p>
+                  {mostrarDropdown && busquedaMedico.trim() !== '' && medicosFiltrados.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-60 overflow-y-auto z-50">
+                      {medicosFiltrados.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => seleccionarMedico(m)}
+                          className="w-full text-left p-3 hover:bg-blue-50 border-b border-slate-100 last:border-0 transition flex flex-col"
+                        >
+                          <span className="font-bold text-slate-800 text-sm">{m.nombre}</span>
+                          <span className="text-xs text-blue-600 font-medium">{m.especialidad}</span>
+                          <span className="text-[11px] text-slate-500 mt-0.5">
+                            📍 {m.direccion || 'Guayaquil'} | 🏢 {m.consultorio || 'Consultorio N/A'}
+                          </span>
+                        </button>
+                      ))}
                     </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+                  )}
+
+                  {medicoSeleccionadoObj && (
+                    <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                      <div>
+                        <span className="text-slate-400 font-semibold uppercase text-[10px] block">
+                          Lugar de Atención Presencial:
+                        </span>
+                        <p className="font-bold text-slate-800 text-xs">
+                          {medicoSeleccionadoObj.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}
+                        </p>
+                        <p className="text-blue-700 font-extrabold mt-0.5">
+                          🏢 {medicoSeleccionadoObj.consultorio || 'Piso 2, Consultorio 204'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* FECHA */}
             <div>
@@ -441,7 +519,7 @@ function AgendarContenido() {
               </div>
             )}
 
-            {/* DATOS DEL PACIENTE */}
+            {/* DATOS DEL PACIENTE CON BÚSQUEDA INTUITIVA (POR NOMBRE O CÉDULA) */}
             <div className="border-t pt-6 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase">4. Datos del Paciente:</h3>
 
@@ -455,6 +533,51 @@ function AgendarContenido() {
                   <option value="presencial">🏥 Consulta Presencial en Consultorio</option>
                   <option value="telemedicina">💻 Videoconsulta / Telemedicina</option>
                 </select>
+              </div>
+
+              {/* BUSCADOR INTUITIVO DE PACIENTES */}
+              <div className="relative">
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Buscar Paciente Existente (por Nombre o Cédula)
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="🔍 Escribe el nombre o cédula del paciente..."
+                    value={busquedaPaciente}
+                    onChange={(e) => handleBuscarPacienteInput(e.target.value)}
+                    className="w-full p-3 border rounded-xl text-xs text-slate-800 font-semibold bg-white"
+                  />
+                  {pacienteSeleccionadoId && (
+                    <button
+                      type="button"
+                      onClick={limpiarPacienteSeleccionado}
+                      className="absolute right-3 top-3 text-xs text-rose-600 font-bold hover:underline"
+                    >
+                      Cambiar / Limpiar
+                    </button>
+                  )}
+                </div>
+
+                {/* DROPDOWN DE SUGERENCIAS DE PACIENTES */}
+                {sugerenciasPacientes.length > 0 && !pacienteSeleccionadoId && (
+                  <div className="absolute left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-48 overflow-y-auto z-50 divide-y divide-slate-100">
+                    {sugerenciasPacientes.map((pac) => (
+                      <button
+                        key={pac.id}
+                        type="button"
+                        onClick={() => seleccionarPacienteExistente(pac)}
+                        className="w-full text-left p-3 hover:bg-blue-50 transition flex justify-between items-center text-xs"
+                      >
+                        <div>
+                          <p className="font-bold text-slate-800">{pac.nombre}</p>
+                          <p className="text-[11px] text-slate-500">🪪 {pac.cedula} | 📱 {pac.telefono || 'Sin tel'}</p>
+                        </div>
+                        <span className="bg-blue-100 text-blue-700 font-bold px-2 py-1 rounded text-[10px]">Seleccionar ➔</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -476,7 +599,9 @@ function AgendarContenido() {
                     type="text"
                     placeholder="Ej. 0912345678"
                     value={cedulaPaciente}
-                    onChange={(e) => cedulaPaciente.length <= 10 && setCedulaPaciente(e.target.value)}
+                    onChange={(e) => {
+                      if (e.target.value.length <= 10) setCedulaPaciente(e.target.value);
+                    }}
                     className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
                     required
                   />
@@ -497,7 +622,7 @@ function AgendarContenido() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico (Opcional)</label>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico</label>
                   <input
                     type="email"
                     placeholder="ejemplo@correo.com"
