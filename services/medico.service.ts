@@ -333,51 +333,59 @@ export const MedicoService = {
     return listaHoras;
   },
 
-  async obtenerHistorialPaciente(pacienteId: string) {
-    const { data, error } = await supabase
-      .from('historias_clinicas')
-      .select(`
-        id,
-        cita_id,
-        fecha_registro,
-        motivo_consulta,
-        diagnostico,
-        tratamiento_prescripcion,
-        medicos (
-          nombre,
-          especialidad
-        )
-      `)
-      .eq('paciente_id', pacienteId)
-      .order('fecha_registro', { ascending: false });
+ async obtenerHistorialPaciente(pacienteId: string) {
+  const { data, error } = await supabase
+    .from('historias_clinicas')
+    .select('*, medicos(nombre, especialidad)')
+    .eq('paciente_id', pacienteId)
+    .order('fecha_registro', { ascending: true }); // <--- Cambiado a true para ir de la más antigua a la más actual
 
-    if (error) throw error;
-    return data || [];
-  },
+  if (error) throw error;
+  return data || [];
+},
 
   async guardarAtencionClinica(params: {
-    citaId: string;
-    pacienteId: string;
-    medicoId: string;
-    motivoConsulta: string;
-    diagnostico: string;
-    tratamiento: string;
-  }) {
+  citaId?: string | null;
+  pacienteId: string;
+  medicoId: string;
+  motivoConsulta: string;
+  diagnostico: string;
+  tratamiento: string;
+  fechaRegistro?: string; // <-- Nuevo parámetro opcional
+}) {
+  const payload: any = {
+    cita_id: params.citaId || null,
+    paciente_id: params.pacienteId,
+    medico_id: params.medicoId,
+    motivo_consulta: params.motivoConsulta,
+    diagnostico: params.diagnostico,
+    tratamiento_prescripcion: params.tratamiento,
+  };
+
+  // Si viene una fecha histórica, la asignamos (agregamos T12:00:00 para evitar desfases de zona horaria)
+  if (params.fechaRegistro) {
+    payload.fecha_registro = `${params.fechaRegistro}T12:00:00`;
+  }
+
+    // En tu services/medico.service.ts dentro de guardarAtencionClinica
     const { error: errorHistoria } = await supabase
-      .from('historias_clinicas')
-      .insert([{
-        cita_id: params.citaId,
+    .from('historias_clinicas')
+    .insert([{
+        cita_id: params.citaId && params.citaId.trim() !== '' ? params.citaId : null, // <--- Esto previene el error con UUID vacío
         paciente_id: params.pacienteId,
         medico_id: params.medicoId,
         motivo_consulta: params.motivoConsulta,
         diagnostico: params.diagnostico,
-        tratamiento_prescripcion: params.tratamiento
-      }]);
+        tratamiento_prescripcion: params.tratamiento,
+        fecha_registro: params.fechaRegistro ? `${params.fechaRegistro}T12:00:00` : new Date().toISOString()
+    }]);
 
     if (errorHistoria) throw errorHistoria;
 
+    if (params.citaId && params.citaId.trim() !== '') {
     await MedicoService.actualizarEstadoCita(params.citaId, 'atendida');
-  },
+    }
+},
 
   async crearMedico(medico: any) {
     const { error } = await supabase.from('medicos').insert([medico]);

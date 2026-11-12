@@ -43,6 +43,9 @@ export default function ConsultarPage() {
       return;
     }
 
+    // Obtenemos la fecha y hora actual en formato ISO para el filtro
+    const fechaHoraActual = new Date().toISOString();
+
     const { data: citasData } = await supabase
       .from('citas')
       .select(`
@@ -54,7 +57,8 @@ export default function ConsultarPage() {
         medicos ( nombre, especialidad, direccion, consultorio )
       `)
       .eq('paciente_id', paciente.id)
-      .order('fecha_hora', { ascending: false });
+      .gte('fecha_hora', fechaHoraActual) // <--- FILTRA DESDE LA FECHA Y HORA ACTUAL EN ADELANTE
+      .order('fecha_hora', { ascending: true }); // <--- ORDENA DE LA MÁS PRÓXIMA A LA MÁS LEJANA
 
     if (citasData) {
       setCitas(citasData as unknown as CitaPaciente[]);
@@ -96,7 +100,7 @@ export default function ConsultarPage() {
       <main className="flex-1 py-10 px-6 max-w-xl mx-auto w-full">
         <div className="bg-white rounded-2xl shadow-md p-8 border border-slate-100">
           <h1 className="text-2xl font-bold text-slate-800 mb-1">🔎 Consultar Mis Citas</h1>
-          <p className="text-xs text-slate-500 mb-6">Ingresa tu número de cédula para ver tus citas registradas.</p>
+          <p className="text-xs text-slate-500 mb-6">Ingresa tu número de cédula para ver tus próximas citas registradas.</p>
 
           <form onSubmit={handleBuscar} className="flex gap-2 mb-8">
             <input
@@ -120,7 +124,7 @@ export default function ConsultarPage() {
             <div>
               {citas.length === 0 ? (
                 <div className="p-4 bg-slate-50 rounded-xl text-center text-sm text-slate-500 border">
-                  No se encontraron citas asociadas al número de cédula ingresado.
+                  No se encontraron citas futuras asociadas al número de cédula ingresado.
                 </div>
               ) : (
                 <div className="space-y-4">

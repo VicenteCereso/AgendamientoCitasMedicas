@@ -90,6 +90,14 @@ export default function PanelMedicoPage() {
   const [historiaLibreSeleccionada, setHistoriaLibreSeleccionada] = useState<any | null>(null);
   const [buscandoLibre, setBuscandoLibre] = useState<boolean>(false);
 
+  // Edición de Paciente en Consulta Libre / Migración
+  const [editandoPaciente, setEditandoPaciente] = useState<boolean>(false);
+  const [editNombre, setEditNombre] = useState<string>('');
+  const [editCedula, setEditCedula] = useState<string>('');
+  const [editTelefono, setEditTelefono] = useState<string>('');
+  const [editEmail, setEditEmail] = useState<string>('');
+  const [guardandoEdicion, setGuardandoEdicion] = useState<boolean>(false);
+
   // Formulario para Crear Paciente sin Cita (Migración)
   const [modoCrearPacienteMigracion, setModoCrearPacienteMigracion] = useState<boolean>(false);
   const [nuevaCedulaMigracion, setNuevaCedulaMigracion] = useState<string>('');
@@ -286,6 +294,45 @@ export default function PanelMedicoPage() {
     setLoadingEditPac(false);
   }
 
+  function abrirEdicionPaciente() {
+    if (!pacienteConsultaLibre) return;
+    setEditNombre(pacienteConsultaLibre.nombre || '');
+    setEditCedula(pacienteConsultaLibre.cedula || '');
+    setEditTelefono(pacienteConsultaLibre.telefono || '');
+    setEditEmail(pacienteConsultaLibre.email || '');
+    setEditandoPaciente(true);
+  }
+
+  async function guardarEdicionPaciente(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pacienteConsultaLibre?.id) return;
+    if (!editNombre.trim()) {
+      alert('El nombre del paciente es obligatorio.');
+      return;
+    }
+
+    setGuardandoEdicion(true);
+    try {
+      const cedulaLimpia = editCedula.trim() !== '' ? editCedula.trim() : null;
+
+      const actualizado = await MedicoService.actualizarPaciente(pacienteConsultaLibre.id, {
+      nombre: editNombre.trim(),
+      cedula: cedulaLimpia as string,
+      telefono: editTelefono.trim() || '', // <--- Cambiado de undefined a '' (cadena vacía)
+      email: editEmail.trim() || '',       // <--- Cambiado de undefined a '' (cadena vacía)
+    });
+
+      // Actualizamos el paciente seleccionado en pantalla con los nuevos datos
+      setPacienteConsultaLibre(actualizado);
+      setCriterioBusquedaLibre(actualizado.nombre);
+      setEditandoPaciente(false);
+      alert('¡Datos del paciente actualizados correctamente!');
+    } catch (err: any) {
+      alert('Error al actualizar paciente: ' + err.message);
+    }
+    setGuardandoEdicion(false);
+  }
+
   // BUSCADOR INTUITIVO EN TIEMPO REAL (AUTOCOMPLETADO)
   useEffect(() => {
     const timer = setTimeout(async () => {
@@ -312,6 +359,7 @@ export default function PanelMedicoPage() {
     setSugerenciasPacientes([]);
     setModoCrearHistorico(false);
     setModoCrearPacienteMigracion(false);
+    setEditandoPaciente(false);
 
     try {
       const historial = await MedicoService.obtenerHistorialPaciente(pac.id);
@@ -328,18 +376,20 @@ export default function PanelMedicoPage() {
 
   async function registrarPacienteSinCita(e: React.FormEvent) {
     e.preventDefault();
-    if (!nuevaCedulaMigracion || !nuevoNombreMigracion) {
-      alert('Por favor ingrese al menos la cédula y el nombre del paciente.');
+    if (!nuevoNombreMigracion.trim()) {
+      alert('Por favor ingrese al menos el nombre del paciente.');
       return;
     }
 
     setLoadingCrearMigracion(true);
     try {
+      const cedulaAEnviar = nuevaCedulaMigracion.trim() !== '' ? nuevaCedulaMigracion.trim() : null;
+
       const nuevoPac = await MedicoService.crearPaciente({
-        cedula: nuevaCedulaMigracion,
-        nombre: nuevoNombreMigracion,
-        telefono: nuevoTelefonoMigracion || '',
-        email: nuevoEmailMigracion || ''
+        cedula: cedulaAEnviar as string,
+        nombre: nuevoNombreMigracion.trim(),
+        telefono: nuevoTelefonoMigracion.trim() || '',
+        email: nuevoEmailMigracion.trim() || ''
       });
 
       alert('¡Paciente registrado con éxito! Ya puede ingresarle su historial retrospectivo.');
@@ -389,12 +439,13 @@ export default function PanelMedicoPage() {
       const targetMedicoId = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
       
       await MedicoService.guardarAtencionClinica({
-        citaId: '',
+        citaId: null,
         pacienteId: pacienteConsultaLibre.id,
         medicoId: targetMedicoId,
         motivoConsulta: `[MIGRACIÓN HISTÓRICA] ${motivoHistoricoRetrof}`,
         diagnostico: diagnosticoHistoricoRetrof,
-        tratamiento: tratamientoTexto || 'Ninguno especificado'
+        tratamiento: tratamientoTexto || 'Ninguno especificado',
+        fechaRegistro: fechaHistoricaRetrof
       });
 
       alert('¡Atención histórica registrada con éxito en el expediente del paciente!');
@@ -564,7 +615,7 @@ export default function PanelMedicoPage() {
     setGuardandoHistoria(false);
   }
 
-  // NUEVA FUNCIÓN: Enviar receta por correo desde el modal
+  // Enviar receta por correo desde el modal
   async function enviarRecetaPorCorreoModal() {
     if (!recetaParaImprimir || !recetaParaImprimir.paciente?.email) {
       alert('El paciente no tiene un correo electrónico registrado para enviar la receta.');
@@ -790,7 +841,17 @@ export default function PanelMedicoPage() {
         c.pacientes?.telefono?.includes(busqueda);
 
       const coincideEstado = filtroEstado === 'todas' ? true : c.estado === filtroEstado;
-      const fechaCitaStr = c.fecha_hora ? new Date(c.fecha_hora).toISOString().split('T')[0] : '';
+
+      // EXTRACCIÓN SEGURA DE LA FECHA LOCAL (Evita desfases de zona horaria UTC)
+      let fechaCitaStr = '';
+      if (c.fecha_hora) {
+        const d = new Date(c.fecha_hora);
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        fechaCitaStr = `${year}-${month}-${day}`;
+      }
+
       const coincideFecha = fechaFiltro === '' ? true : fechaCitaStr === fechaFiltro;
 
       return (coincideBusqueda || busqueda === '') && coincideEstado && coincideFecha;
@@ -1037,16 +1098,24 @@ export default function PanelMedicoPage() {
                 className="p-3 bg-white border border-slate-200 rounded-xl text-xs w-full md:w-80 font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600/20"
               />
               <div className="flex gap-2 items-center flex-wrap">
-                <span className="text-xs font-bold text-slate-600">Fecha:</span>
-                <input
-                  type="date"
-                  value={fechaFiltro}
-                  onChange={(e) => setFechaFiltro(e.target.value)}
-                  className="bg-white border border-slate-200 text-xs p-2.5 rounded-xl font-semibold text-slate-800"
-                />
-                {fechaFiltro !== '' && (
-                  <button onClick={() => setFechaFiltro('')} className="text-xs font-bold text-blue-600 hover:underline px-2">Ver todas</button>
-                )}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-600">Fecha:</span>
+                  <input
+                    type="date"
+                    value={fechaFiltro}
+                    onChange={(e) => setFechaFiltro(e.target.value)}
+                    className="p-2 border rounded-xl text-xs font-semibold text-slate-800"
+                  />
+                  {fechaFiltro && (
+                    <button
+                      type="button"
+                      onClick={() => setFechaFiltro('')}
+                      className="text-xs font-bold text-blue-600 hover:underline"
+                    >
+                      Ver todas
+                    </button>
+                  )}
+                </div>
                 <select 
                   value={filtroEstado} 
                   onChange={(e) => setFiltroEstado(e.target.value)} 
@@ -1081,7 +1150,7 @@ export default function PanelMedicoPage() {
                           </div>
 
                           <div className="flex items-center gap-2 text-xs text-slate-500 font-medium flex-wrap">
-                            <span className="bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">🪪 {c.pacientes?.cedula}</span>
+                            <span className="bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">🪪 {c.pacientes?.cedula || 'Sin cédula'}</span>
                             <span className="bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">📱 {c.pacientes?.telefono || 'Sin teléfono'}</span>
                             <span className="bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">✉️ {c.pacientes?.email || 'Sin correo'}</span>
                             <span className="bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100 capitalize">🏥 {c.tipo_consulta}</span>
@@ -1332,14 +1401,12 @@ export default function PanelMedicoPage() {
                     const val = e.target.value;
                     setCedulaBusquedaManual(val);
                     
-                    // Si el usuario borra la búsqueda, limpiamos el paciente seleccionado
                     if (!val.trim()) {
                       setPacienteEncontrado(null);
                       setSugerenciasPacientes([]);
                       return;
                     }
 
-                    // Búsqueda en tiempo real intuitiva (por cédula o nombres)
                     try {
                       setBuscandoPaciente(true);
                       const resultados = await MedicoService.buscarPacientesPorCriterio(val.trim());
@@ -1354,7 +1421,6 @@ export default function PanelMedicoPage() {
                   className="w-full p-3 border rounded-xl text-xs bg-white font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600/20" 
                 />
 
-                {/* DROPDOWN DE SUGERENCIAS INTUITIVAS */}
                 {sugerenciasPacientes.length > 0 && !pacienteEncontrado && (
                   <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-2xl shadow-xl z-30 max-h-56 overflow-y-auto divide-y divide-slate-100">
                     {sugerenciasPacientes.map((pac) => (
@@ -1363,14 +1429,14 @@ export default function PanelMedicoPage() {
                         type="button"
                         onClick={() => {
                           setPacienteEncontrado(pac);
-                          setCedulaBusquedaManual(pac.cedula);
+                          setCedulaBusquedaManual(pac.cedula || pac.nombre);
                           setSugerenciasPacientes([]);
                         }}
                         className="w-full text-left p-3 hover:bg-blue-50/80 transition flex justify-between items-center text-xs"
                       >
                         <div>
                           <p className="font-bold text-slate-900">{pac.nombre}</p>
-                          <p className="text-[11px] text-slate-500">🪪 Cédula: {pac.cedula} | 📱 Tel: {pac.telefono || 'Sin teléfono'}</p>
+                          <p className="text-[11px] text-slate-500">🪪 Cédula: {pac.cedula || 'Sin cédula'} | 📱 Tel: {pac.telefono || 'Sin teléfono'}</p>
                         </div>
                         <span className="bg-blue-100 text-blue-700 font-bold px-2.5 py-1 rounded-lg text-[10px]">Seleccionar ➔</span>
                       </button>
@@ -1380,7 +1446,6 @@ export default function PanelMedicoPage() {
               </div>
             </div>
 
-            {/* SI YA SE SELECCIONÓ O ENCONTRÓ UN PACIENTE */}
             {pacienteEncontrado && (
               <div className="p-4 bg-white rounded-2xl border border-slate-200 space-y-4 animate-fadeIn">
                 {pacienteEncontrado.id ? (
@@ -1388,7 +1453,7 @@ export default function PanelMedicoPage() {
                     <div className="flex justify-between items-center bg-emerald-50 p-3.5 rounded-xl border border-emerald-200">
                       <div>
                         <p className="text-xs text-emerald-900 font-bold">✅ Paciente Seleccionado: {pacienteEncontrado.nombre}</p>
-                        <p className="text-[11px] text-emerald-700">🪪 Cédula: {pacienteEncontrado.cedula} | 📱 {pacienteEncontrado.telefono || 'Sin teléfono'} | ✉️ {pacienteEncontrado.email || 'Sin correo'}</p>
+                        <p className="text-[11px] text-emerald-700">🪪 Cédula: {pacienteEncontrado.cedula || 'Sin cédula'} | 📱 {pacienteEncontrado.telefono || 'Sin teléfono'} | ✉️ {pacienteEncontrado.email || 'Sin correo'}</p>
                       </div>
                       <button
                         type="button"
@@ -1436,7 +1501,6 @@ export default function PanelMedicoPage() {
                     </button>
                   </div>
                 ) : (
-                  /* SI NO EXISTE EN LA BASE DE DATOS, PERMITIMOS REGISTRARLO POR PRIMERA VEZ */
                   <div className="space-y-3">
                     <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
                       <p className="text-xs text-amber-800 font-bold">⚠️ La cédula ingresada no está registrada en el sistema.</p>
@@ -1445,7 +1509,7 @@ export default function PanelMedicoPage() {
 
                     <input type="text" placeholder="Nombre Completo" value={nombreNuevoPac} onChange={(e) => setNombreNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
                     <input type="text" placeholder="Teléfono" value={telefonoNuevoPac} onChange={(e) => setTelefonoNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
-                    <input type="email" placeholder="Correo electrónico (para notificaciones)" value={emailNuevoPac} onChange={(e) => setEmailNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" required />
+                    <input type="email" placeholder="Correo electrónico (para notificaciones)" value={emailNuevoPac} onChange={(e) => setEmailNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
 
                     <div className="grid grid-cols-2 gap-2 pt-2">
                       <div>
@@ -1485,7 +1549,6 @@ export default function PanelMedicoPage() {
             )}
           </div>
         )}
-        
 
         {/* TAB 3: CONSULTAR EXPEDIENTE / MIGRACIÓN */}
         {tabActiva === 'consultar_expediente' && (
@@ -1505,10 +1568,11 @@ export default function PanelMedicoPage() {
                   setModoCrearPacienteMigracion(!modoCrearPacienteMigracion);
                   setPacienteConsultaLibre(null);
                   setModoCrearHistorico(false);
+                  setEditandoPaciente(false);
                 }}
                 className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2.5 px-4 rounded-xl transition shadow-sm flex items-center gap-1.5"
               >
-                {modoCrearPacienteMigracion ? '✕ Cancelar' : '➕ Registrar Paciente sin Cita'}
+                {modoCrearPacienteMigracion ? '✕ Cancelar' : '➕ Registrar Paciente'}
               </button>
             </div>
 
@@ -1519,18 +1583,17 @@ export default function PanelMedicoPage() {
                 </h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Cédula de Identidad</label>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Cédula de Identidad (Opcional)</label>
                     <input
                       type="text"
                       value={nuevaCedulaMigracion}
                       onChange={(e) => setNuevaCedulaMigracion(e.target.value)}
                       placeholder="Ej: 0923710594"
                       className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
-                      required
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Nombre Completo</label>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Nombre Completo *</label>
                     <input
                       type="text"
                       value={nuevoNombreMigracion}
@@ -1541,7 +1604,7 @@ export default function PanelMedicoPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Teléfono</label>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Teléfono (Opcional)</label>
                     <input
                       type="text"
                       value={nuevoTelefonoMigracion}
@@ -1551,7 +1614,7 @@ export default function PanelMedicoPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Correo Electrónico</label>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Correo Electrónico (Opcional)</label>
                     <input
                       type="email"
                       value={nuevoEmailMigracion}
@@ -1603,7 +1666,7 @@ export default function PanelMedicoPage() {
                     >
                       <div>
                         <p className="font-bold text-slate-900">{pac.nombre}</p>
-                        <p className="text-[11px] text-slate-500">🪪 Cédula: {pac.cedula} | 📱 Tel: {pac.telefono || 'Sin teléfono'}</p>
+                        <p className="text-[11px] text-slate-500">🪪 Cédula: {pac.cedula || 'Sin registrar'} | 📱 Tel: {pac.telefono || 'Sin teléfono'}</p>
                       </div>
                       <span className="bg-blue-100 text-blue-700 font-bold px-2.5 py-1 rounded-lg text-[10px]">Seleccionar ➔</span>
                     </button>
@@ -1616,8 +1679,19 @@ export default function PanelMedicoPage() {
               <div className="space-y-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm animate-fadeIn">
                 <div className="flex justify-between items-center border-b pb-3 flex-wrap gap-2">
                   <div>
-                    <h4 className="font-bold text-sm text-slate-900">👤 {pacienteConsultaLibre.nombre}</h4>
-                    <p className="text-xs text-slate-500 mt-0.5">🪪 Cédula: {pacienteConsultaLibre.cedula} | 📱 Tel: {pacienteConsultaLibre.telefono || 'Sin teléfono'} | ✉️ {pacienteConsultaLibre.email || 'Sin correo'}</p>
+                    <div className="flex items-center gap-2.5">
+                      <h4 className="font-bold text-sm text-slate-900">👤 {pacienteConsultaLibre.nombre}</h4>
+                      <button
+                        type="button"
+                        onClick={abrirEdicionPaciente}
+                        className="text-[11px] bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold px-2.5 py-1 rounded-lg transition"
+                      >
+                        ✏️ Editar Datos
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      🪪 Cédula: {pacienteConsultaLibre.cedula || 'Sin registrar'} | 📱 Tel: {pacienteConsultaLibre.telefono || 'Sin teléfono'} | ✉️ {pacienteConsultaLibre.email || 'Sin correo'}
+                    </p>
                   </div>
                   
                   <div className="flex items-center gap-2">
@@ -1629,6 +1703,82 @@ export default function PanelMedicoPage() {
                     </button>
                   </div>
                 </div>
+
+                {/* FORMULARIO DESPLEGABLE PARA EDITAR DATOS DEL PACIENTE */}
+                {editandoPaciente && (
+                  <form onSubmit={guardarEdicionPaciente} className="p-4 bg-amber-50/70 border border-amber-200 rounded-2xl space-y-3 animate-fadeIn">
+                    <div className="flex justify-between items-center border-b border-amber-200 pb-2">
+                      <h5 className="text-xs font-extrabold text-amber-900 uppercase tracking-wider">✏️ Actualizar Información del Paciente</h5>
+                      <button
+                        type="button"
+                        onClick={() => setEditandoPaciente(false)}
+                        className="text-xs text-slate-500 hover:text-slate-800 font-bold"
+                      >
+                        ✕ Cerrar
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Nombre Completo *</label>
+                        <input
+                          type="text"
+                          value={editNombre}
+                          onChange={(e) => setEditNombre(e.target.value)}
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Cédula de Identidad</label>
+                        <input
+                          type="text"
+                          value={editCedula}
+                          onChange={(e) => setEditCedula(e.target.value)}
+                          placeholder="Ej: 0923710594"
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Teléfono</label>
+                        <input
+                          type="text"
+                          value={editTelefono}
+                          onChange={(e) => setEditTelefono(e.target.value)}
+                          placeholder="Ej: 0991234567"
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Correo Electrónico</label>
+                        <input
+                          type="email"
+                          value={editEmail}
+                          onChange={(e) => setEditEmail(e.target.value)}
+                          placeholder="Ej: paciente@email.com"
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setEditandoPaciente(false)}
+                        className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-200 hover:bg-slate-300 rounded-xl transition"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={guardandoEdicion}
+                        className="px-5 py-2 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-xl shadow-sm transition"
+                      >
+                        {guardandoEdicion ? 'Guardando...' : '💾 Guardar Cambios'}
+                      </button>
+                    </div>
+                  </form>
+                )}
 
                 {modoCrearHistorico && (
                   <form onSubmit={guardarHistoricoRetrospectivo} className="p-4 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-4">
@@ -2034,7 +2184,7 @@ export default function PanelMedicoPage() {
 
                 <div className="text-xs space-y-1 bg-slate-50 p-3 rounded-xl border">
                   <p><strong>Paciente:</strong> {recetaParaImprimir.paciente?.nombre}</p>
-                  <p><strong>Cédula:</strong> {recetaParaImprimir.paciente?.cedula}</p>
+                  <p><strong>Cédula:</strong> {recetaParaImprimir.paciente?.cedula || 'Sin registrar'}</p>
                   <p><strong>Correo Electrónico:</strong> {recetaParaImprimir.paciente?.email || 'No registrado'}</p>
                   <p><strong>Diagnóstico:</strong> {recetaParaImprimir.diagnostico}</p>
                 </div>
