@@ -1,91 +1,151 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { leerBody, obtenerAdmin, responderError } from '@/lib/adminAuth';
 import { NextRequest, NextResponse } from 'next/server';
 
 
-export const runtime = 'nodejs';
+// Se ejecuta en Node.js (runtime por defecto). No declarar `runtime`:
+// es incompatible con `cacheComponents` en next.config.
 
 const DOMINIO_INTERNO = 'agendamiento.internal';
 const REGEX_USUARIO = /^[a-z0-9._-]{3,30}$/;
-
-function responderError(mensaje: string, status: number) {
-  return NextResponse.json({ error: mensaje }, { status });
-}
 
 function mensajeAuth(msg?: string) {
   if (msg && /already|registered|exists/i.test(msg)) return 'Ese usuario ya existe.';
   return 'No se pudo crear la cuenta: ' + (msg || 'error desconocido');
 }
 
-// Comprueba que quien llama es un administrador con sesión válida.
-async function obtenerAdmin(req: NextRequest) {
-  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token) return null;
-
-  const { data, error } = await supabaseAdmin.auth.getUser(token);
-  if (error || !data.user) return null;
-
-  const { data: perfil } = await supabaseAdmin
-    .from('medicos')
-    .select('id, rol')
-    .eq('auth_user_id', data.user.id)
-    .maybeSingle();
-
-  return perfil?.rol === 'admin' ? perfil : null;
-}
-
-export async function POST(req: NextRequest) {
-  const admin = await obtenerAdmin(req);
-  if (!admin) return responderError('No autorizado.', 403);
-
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return responderError('Datos inválidos.', 400);
-  }
-
-  const usuario = String(body.usuario || '').trim().toLowerCase();
-  const password = String(body.password || '');
-  const medicoId: string | null = body.medicoId || null;
-
+// Valida usuario/contraseña y que el usuario no lo tenga otro médico.
+// Devuelve un mensaje de error o null si todo está bien.
+async function validarCredenciales(usuario: string, password: string, medicoId: string | null) {
   if (!REGEX_USUARIO.test(usuario)) {
-    return responderError(
-      'El usuario debe tener entre 3 y 30 caracteres: letras minúsculas, números, punto, guion o guion bajo.',
-      400
-    );
+    return 'El usuario debe tener entre 3 y 30 caracteres: letras minúsculas, números, punto, guion o guion bajo.';
   }
   if (password.length < 8) {
-    return responderError('La contraseña debe tener al menos 8 caracteres.', 400);
+    return 'La contraseña debe tener al menos 8 caracteres.';
   }
-
-  // El usuario no puede repetirse
   const { data: repetido } = await supabaseAdmin
     .from('medicos')
     .select('id')
     .eq('usuario', usuario)
     .maybeSingle();
-  if (repetido && repetido.id !== medicoId) {
-    return responderError('Ese usuario ya existe.', 409);
+  if (repetido && repetido.id !== medicoId) return 'Ese usuario ya existe.';
+  return null;
+}
+
+// Busca la especialidad del catálogo. Solo se permite una inactiva si el médico ya la tenía asignada.
+async function resolverEspecialidad(especialidadId: string, especialidadActualId: string | null) {
+  if (!especialidadId) return { error: 'Selecciona una especialidad.' };
+  const { data } = await supabaseAdmin
+    .from('especialidades')
+    .select('id, nombre, activo')
+    .eq('id', especialidadId)
+    .maybeSingle();
+  if (!data) return { error: 'La especialidad seleccionada no existe.' };
+  if (!data.activo && data.id !== especialidadActualId) {
+    return { error: 'La especialidad seleccionada está desactivada.' };
+  }
+  return { especialidad: data };
+}
+
+// Solo los campos de perfil que el administrador puede cambiar.
+// El rol y el auth_user_id NUNCA se toman del navegador.
+function camposPerfil(body: any) {
+  return {
+    nombre: String(body.nombre || '').trim(),
+    email: String(body.email || '').trim() || null,
+    telefono: String(body.telefono || '').trim(),
+    tiene_historia_clinica: body.tiene_historia_clinica !== false,
+  };
+}
+
+// ---- Registrar un médico nuevo con su cuenta de acceso ----
+export async function POST(req: NextRequest) {
+  const admin = await obtenerAdmin(req);
+  if (!admin) return responderError('No autorizado.', 403);
+
+  const body = await leerBody(req);
+  if (!body) return responderError('Datos inválidos.', 400);
+
+  const perfil = camposPerfil(body);
+  if (!perfil.nombre) return responderError('El nombre es obligatorio.', 400);
+
+  const esp = await resolverEspecialidad(String(body.especialidadId || ''), null);
+  if (esp.error) return responderError(esp.error, 400);
+
+  const usuario = String(body.usuario || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  const errCred = await validarCredenciales(usuario, password, null);
+  if (errCred) return responderError(errCred, errCred === 'Ese usuario ya existe.' ? 409 : 400);
+
+  const { data: nuevo, error: errAuth } = await supabaseAdmin.auth.admin.createUser({
+    email: `${usuario}@${DOMINIO_INTERNO}`,
+    password,
+    email_confirm: true,
+  });
+  if (errAuth || !nuevo.user) return responderError(mensajeAuth(errAuth?.message), 400);
+
+  const { data: medico, error: errDb } = await supabaseAdmin
+    .from('medicos')
+    .insert([{
+      ...perfil,
+      especialidad_id: esp.especialidad!.id,
+      especialidad: esp.especialidad!.nombre,
+      rol: 'medico',
+      usuario,
+      auth_user_id: nuevo.user.id,
+    }])
+    .select('id')
+    .single();
+
+  if (errDb || !medico) {
+    await supabaseAdmin.auth.admin.deleteUser(nuevo.user.id); // deshacer la cuenta creada
+    return responderError('No se pudo registrar el médico: ' + (errDb?.message || ''), 500);
   }
 
-  const emailInterno = `${usuario}@${DOMINIO_INTERNO}`;
+  return NextResponse.json({ ok: true, id: medico.id, usuario });
+}
 
-  // ---- CASO 1: médico que ya existe (dar acceso o cambiar usuario/contraseña) ----
-  if (medicoId) {
-    const { data: medico } = await supabaseAdmin
-      .from('medicos')
-      .select('id, rol, auth_user_id')
-      .eq('id', medicoId)
-      .maybeSingle();
+// ---- Editar un médico existente (datos y, opcionalmente, usuario/contraseña) ----
+export async function PATCH(req: NextRequest) {
+  const admin = await obtenerAdmin(req);
+  if (!admin) return responderError('No autorizado.', 403);
 
-    if (!medico) return responderError('Médico no encontrado.', 404);
+  const body = await leerBody(req);
+  if (!body) return responderError('Datos inválidos.', 400);
+
+  const medicoId = String(body.medicoId || '');
+  if (!medicoId) return responderError('Falta el médico a editar.', 400);
+
+  const perfil = camposPerfil(body);
+  if (!perfil.nombre) return responderError('El nombre es obligatorio.', 400);
+
+  const { data: medico } = await supabaseAdmin
+    .from('medicos')
+    .select('id, rol, auth_user_id, especialidad_id')
+    .eq('id', medicoId)
+    .maybeSingle();
+  if (!medico) return responderError('Médico no encontrado.', 404);
+
+  const esp = await resolverEspecialidad(String(body.especialidadId || ''), medico.especialidad_id);
+  if (esp.error) return responderError(esp.error, 400);
+
+  const password = String(body.password || '');
+  const cambiarAcceso = password.length > 0;
+  const usuario = String(body.usuario || '').trim().toLowerCase();
+
+  if (cambiarAcceso) {
     if (medico.rol === 'admin') {
       return responderError('La cuenta de administrador no se gestiona desde aquí.', 403);
     }
+    const errCred = await validarCredenciales(usuario, password, medicoId);
+    if (errCred) return responderError(errCred, errCred === 'Ese usuario ya existe.' ? 409 : 400);
+  }
 
-    let authId = medico.auth_user_id as string | null;
-    let creadoAhora = false;
+  let authId = medico.auth_user_id as string | null;
+  let creadoAhora = false;
 
+  if (cambiarAcceso) {
+    const emailInterno = `${usuario}@${DOMINIO_INTERNO}`;
     if (authId) {
       const { error } = await supabaseAdmin.auth.admin.updateUserById(authId, {
         email: emailInterno,
@@ -103,52 +163,20 @@ export async function POST(req: NextRequest) {
       authId = nuevo.user.id;
       creadoAhora = true;
     }
-
-    const { error: errDb } = await supabaseAdmin
-      .from('medicos')
-      .update({ usuario, auth_user_id: authId })
-      .eq('id', medicoId);
-
-    if (errDb) {
-      if (creadoAhora && authId) await supabaseAdmin.auth.admin.deleteUser(authId);
-      return responderError('No se pudo guardar el usuario: ' + errDb.message, 500);
-    }
-
-    return NextResponse.json({ ok: true, id: medicoId, usuario });
   }
 
-  // ---- CASO 2: médico nuevo ----
-  const nombre = String(body.nombre || '').trim();
-  if (!nombre) return responderError('El nombre es obligatorio.', 400);
+  const datosPerfil = {
+    ...perfil,
+    especialidad_id: esp.especialidad!.id,
+    especialidad: esp.especialidad!.nombre,
+  };
+  const cambios = cambiarAcceso ? { ...datosPerfil, usuario, auth_user_id: authId } : datosPerfil;
+  const { error: errDb } = await supabaseAdmin.from('medicos').update(cambios).eq('id', medicoId);
 
-  const { data: nuevo, error: errAuth } = await supabaseAdmin.auth.admin.createUser({
-    email: emailInterno,
-    password,
-    email_confirm: true,
-  });
-  if (errAuth || !nuevo.user) return responderError(mensajeAuth(errAuth?.message), 400);
-
-  const { data: medico, error: errDb } = await supabaseAdmin
-    .from('medicos')
-    .insert([
-      {
-        nombre,
-        especialidad: String(body.especialidad || '').trim(),
-        email: String(body.email || '').trim() || null,
-        telefono: String(body.telefono || '').trim(),
-        rol: 'medico', // el rol SIEMPRE lo decide el servidor, nunca el navegador
-        tiene_historia_clinica: body.tiene_historia_clinica !== false,
-        usuario,
-        auth_user_id: nuevo.user.id,
-      },
-    ])
-    .select('id')
-    .single();
-
-  if (errDb || !medico) {
-    await supabaseAdmin.auth.admin.deleteUser(nuevo.user.id); // deshacer la cuenta creada
-    return responderError('No se pudo registrar el médico: ' + (errDb?.message || ''), 500);
+  if (errDb) {
+    if (creadoAhora && authId) await supabaseAdmin.auth.admin.deleteUser(authId);
+    return responderError('No se pudo guardar el médico: ' + errDb.message, 500);
   }
 
-  return NextResponse.json({ ok: true, id: medico.id, usuario });
+  return NextResponse.json({ ok: true, id: medicoId, usuario: cambiarAcceso ? usuario : undefined });
 }

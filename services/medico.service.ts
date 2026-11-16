@@ -1,16 +1,115 @@
 import { supabase } from '@/lib/supabaseClient';
 
+// Médico con los datos de su especialidad del catálogo (tipo_atencion decide la pantalla de atención)
+const SELECT_MEDICO = '*, especialidades(id, nombre, tipo_atencion, activo)';
+
+export interface Especialidad {
+  id: string;
+  nombre: string;
+  tipo_atencion: 'medica' | 'psicologica';
+  activo: boolean;
+}
+
+// Llama a una API de administración enviando el token de la sesión actual
+async function llamarApiAdmin(url: string, method: 'POST' | 'PATCH', datos: unknown) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión.');
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify(datos),
+  });
+  const json = await res.json().catch(() => null);
+  if (!json) throw new Error(`El servidor respondió con un error inesperado (${res.status}). Revisa la consola de "next dev".`);
+  if (!res.ok) throw new Error(json.error || 'No se pudo guardar.');
+  return json;
+}
+
+export type EstadoFechaRecurrente = 'disponible' | 'fuera_horario' | 'ocupada' | 'pasada';
+
+// Normaliza YYYY-MM-DD, YYYY/MM/DD o DD/MM/YYYY a YYYY-MM-DD
+function normalizarFecha(fechaStr: string) {
+  let fechaLimpia = fechaStr.trim();
+  if (fechaLimpia.includes('/')) {
+    const p = fechaLimpia.split('/');
+    fechaLimpia = p[0].length === 4
+      ? `${p[0]}-${p[1].padStart(2, '0')}-${p[2].padStart(2, '0')}`
+      : `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}`;
+  }
+  return fechaLimpia;
+}
+
+// Turnos configurados para una fecha (según disponibilidad del médico) y horas ya ocupadas por citas
+function calcularTurnosFecha(todasDisponibilidades: any[], citasTomadas: any[], fechaLimpia: string) {
+  const [anio, mes, dia] = fechaLimpia.split('-').map(Number);
+  const diaSemanaIndex = new Date(anio, mes - 1, dia).getDay();
+
+  // Fecha específica tiene match exacto; si no, se usa la configuración por día de la semana
+  const disponibilidades = todasDisponibilidades.filter((d: any) => {
+    if (d.fecha_especifica) return d.fecha_especifica.split('T')[0].trim() === fechaLimpia;
+    return d.dia_semana === diaSemanaIndex;
+  });
+
+  const ocupadas = new Set<string>(
+    citasTomadas
+      .filter((c: any) => c.fecha_hora && c.estado !== 'cancelada' && c.fecha_hora.split('T')[0].trim() === fechaLimpia)
+      .map((c: any) => {
+        const d = new Date(c.fecha_hora);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      })
+  );
+
+  const turnos: string[] = [];
+  disponibilidades.forEach((disp: any) => {
+    const [hInicio, mInicio] = disp.hora_inicio.split(':').map(Number);
+    const [hFin, mFin] = disp.hora_fin.split(':').map(Number);
+    const duracion = disp.duracion_cita_minutos || 30;
+
+    let inicioAlmuerzo: number | null = null;
+    let finAlmuerzo: number | null = null;
+    if (disp.hora_inicio_almuerzo && disp.hora_fin_almuerzo) {
+      const [ha, ma] = disp.hora_inicio_almuerzo.split(':').map(Number);
+      const [hb, mb] = disp.hora_fin_almuerzo.split(':').map(Number);
+      inicioAlmuerzo = ha * 60 + ma;
+      finAlmuerzo = hb * 60 + mb;
+    }
+
+    let actual = hInicio * 60 + mInicio;
+    const finMin = hFin * 60 + mFin;
+    while (actual + duracion <= finMin) {
+      const caeEnAlmuerzo = inicioAlmuerzo !== null && finAlmuerzo !== null && actual >= inicioAlmuerzo && actual < finAlmuerzo;
+      if (!caeEnAlmuerzo) {
+        turnos.push(`${String(Math.floor(actual / 60)).padStart(2, '0')}:${String(actual % 60).padStart(2, '0')}`);
+      }
+      actual += duracion;
+    }
+  });
+
+  return { turnos, ocupadas };
+}
+
 export const MedicoService = {
   async obtenerSesionYPerfil() {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return { userAuth: null, perfilUsuario: null, esAdmin: false, listaMedicos: [] };
 
     const userAuth = session.user;
-    const { data: perfil } = await supabase
-  .from('medicos')
-  .select('*')
-  .eq('auth_user_id', userAuth.id)
-  .maybeSingle();
+    // Si la tabla 'especialidades' aún no existe, se cae a la consulta simple para no cerrar la sesión
+    const leerPerfil = (sel: string) =>
+      supabase.from('medicos').select(sel).eq('auth_user_id', userAuth.id).maybeSingle<any>();
+
+    let selectMedico = SELECT_MEDICO;
+    const primerIntento = await leerPerfil(selectMedico);
+    let perfil = primerIntento.data;
+    if (primerIntento.error) {
+      console.warn('No se pudo leer la especialidad del catálogo:', primerIntento.error.message);
+      selectMedico = '*';
+      perfil = (await leerPerfil(selectMedico)).data;
+    }
 
 if (!perfil) {
   await supabase.auth.signOut();
@@ -66,8 +165,9 @@ if (!perfil) {
 
     const { data: listaMedicos } = await supabase
       .from('medicos')
-      .select('*')
-      .order('nombre', { ascending: true });
+      .select(selectMedico)
+      .order('nombre', { ascending: true })
+      .returns<any[]>();
 
     return {
       userAuth,
@@ -254,26 +354,35 @@ if (!perfil) {
   return data;
 },
 
+  // Crea varias citas de una vez, agrupadas con un mismo serie_id
+  async agendarCitasRecurrentes(params: {
+    medico_id: string;
+    paciente_id: string;
+    fechas: string[]; // YYYY-MM-DD
+    hora: string;     // HH:MM
+    tipo_consulta: string;
+  }) {
+    const serieId = crypto.randomUUID();
+    const registros = params.fechas.map((fecha) => ({
+      medico_id: params.medico_id,
+      paciente_id: params.paciente_id,
+      fecha_hora: `${fecha}T${params.hora}:00`,
+      tipo_consulta: params.tipo_consulta,
+      enlace_videollamada: params.tipo_consulta === 'telemedicina'
+        ? `https://meet.jit.si/ConsultaMedica-${params.medico_id.substring(0, 5)}-${fecha}-${params.hora.replace(':', '')}`
+        : null,
+      estado: 'confirmada',
+      serie_id: serieId,
+    }));
+
+    const { data, error } = await supabase.from('citas').insert(registros).select('id, fecha_hora, enlace_videollamada');
+    if (error) throw error;
+    return { serieId, citas: data || [] };
+  },
+
   async generarHorariosDisponibles(medicoId: string, fechaStr: string) {
     if (!fechaStr) return [];
-    
-    // Normalización estricta de cualquier formato (YYYY-MM-DD o DD/MM/YYYY con / o -)
-    let fechaLimpia = fechaStr.trim();
-    if (fechaLimpia.includes('/')) {
-      const partes = fechaLimpia.split('/');
-      if (partes[0].length === 4) {
-        // Formato YYYY/MM/DD
-        fechaLimpia = `${partes[0]}-${partes[1].padStart(2, '0')}-${partes[2].padStart(2, '0')}`;
-      } else {
-        // Formato DD/MM/YYYY
-        fechaLimpia = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
-      }
-    }
-
-    // Asegurar objeto de fecha local exacto
-    const [anio, mes, dia] = fechaLimpia.split('-').map(Number);
-    const dateObj = new Date(anio, mes - 1, dia);
-    const diaSemanaIndex = dateObj.getDay();
+    const fechaLimpia = normalizarFecha(fechaStr);
 
     const { data: todasDisponibilidades, error } = await supabase
       .from('disponibilidad_medico')
@@ -282,83 +391,69 @@ if (!perfil) {
 
     if (error || !todasDisponibilidades) return [];
 
-    // Filtrar haciendo match estricto con la fecha normalizada YYYY-MM-DD
-    const disponibilidades = todasDisponibilidades.filter((d: any) => {
-      if (d.fecha_especifica) {
-        const fechaBD = d.fecha_especifica.split('T')[0].trim();
-        return fechaBD === fechaLimpia;
-      }
-      return d.dia_semana === diaSemanaIndex && !d.fecha_especifica;
-    });
-
-    if (!disponibilidades || disponibilidades.length === 0) return [];
-
     const citasTomadas = await MedicoService.obtenerCitas(medicoId);
-    const horasOcupadas = citasTomadas
-      .filter((c: any) => {
-        if (!c.fecha_hora || c.estado === 'cancelada') return false;
-        const fechaCita = c.fecha_hora.split('T')[0].trim();
-        return fechaCita === fechaLimpia;
-      })
-      .map((c: any) => {
-        const d = new Date(c.fecha_hora);
-        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      });
+    const { turnos, ocupadas } = calcularTurnosFecha(todasDisponibilidades, citasTomadas, fechaLimpia);
+    return turnos.filter((h) => !ocupadas.has(h));
+  },
 
-    const listaHoras: string[] = [];
+  // Evalúa varias fechas a una misma hora (citas recurrentes) con solo 2 consultas a la BD.
+  // Estado por fecha: disponible | fuera_horario (no hay turno a esa hora) | ocupada | pasada
+  async evaluarFechasRecurrentes(medicoId: string, fechas: string[], hora: string) {
+    const [{ data: todasDisponibilidades }, citasTomadas] = await Promise.all([
+      supabase.from('disponibilidad_medico').select('*').eq('medico_id', medicoId),
+      MedicoService.obtenerCitas(medicoId),
+    ]);
+    const ahora = new Date();
 
-    disponibilidades.forEach((disp: any) => {
-      const [hInicio, mInicio] = disp.hora_inicio.split(':').map(Number);
-      const [hFin, mFin] = disp.hora_fin.split(':').map(Number);
-      const duracion = disp.duracion_cita_minutos || 30;
-
-      let inicioAlmuerzoMin = null;
-      let finAlmuerzoMin = null;
-
-      if (disp.hora_inicio_almuerzo && disp.hora_fin_almuerzo) {
-        const [hAlmIni, mAlmIni] = disp.hora_inicio_almuerzo.split(':').map(Number);
-        const [hAlmFin, mAlmFin] = disp.hora_fin_almuerzo.split(':').map(Number);
-        inicioAlmuerzoMin = hAlmIni * 60 + mAlmIni;
-        finAlmuerzoMin = hAlmFin * 60 + mAlmFin;
-      }
-
-      let actualMinutos = hInicio * 60 + mInicio;
-      const finMinutos = hFin * 60 + mFin;
-
-      while (actualMinutos + duracion <= finMinutos) {
-        const caeEnAlmuerzo =
-          inicioAlmuerzoMin !== null &&
-          finAlmuerzoMin !== null &&
-          actualMinutos >= inicioAlmuerzoMin &&
-          actualMinutos < finAlmuerzoMin;
-
-        if (!caeEnAlmuerzo) {
-          const hh = String(Math.floor(actualMinutos / 60)).padStart(2, '0');
-          const mm = String(actualMinutos % 60).padStart(2, '0');
-          const horaString = `${hh}:${mm}`;
-
-          if (!horasOcupadas.includes(horaString)) {
-            listaHoras.push(horaString);
-          }
-        }
-
-        actualMinutos += duracion;
-      }
+    return fechas.map((fecha) => {
+      const { turnos, ocupadas } = calcularTurnosFecha(todasDisponibilidades || [], citasTomadas, fecha);
+      const [anio, mes, dia] = fecha.split('-').map(Number);
+      const [hh, mm] = hora.split(':').map(Number);
+      let estado: EstadoFechaRecurrente = 'disponible';
+      if (new Date(anio, mes - 1, dia, hh, mm) <= ahora) estado = 'pasada';
+      else if (ocupadas.has(hora)) estado = 'ocupada';
+      else if (!turnos.includes(hora)) estado = 'fuera_horario';
+      return { fecha, estado };
     });
-
-    return listaHoras;
   },
 
  async obtenerHistorialPaciente(pacienteId: string) {
   const { data, error } = await supabase
     .from('historias_clinicas')
-    .select('*, medicos(nombre, especialidad)')
+    .select('*, medicos(nombre, especialidad, especialidades(tipo_atencion))')
     .eq('paciente_id', pacienteId)
     .order('fecha_registro', { ascending: true }); // <--- Cambiado a true para ir de la más antigua a la más actual
 
   if (error) throw error;
   return data || [];
 },
+
+  // Diagnóstico único por paciente y psicólogo (se registra una vez y luego se edita)
+  async obtenerDiagnosticoPaciente(pacienteId: string, medicoId: string) {
+    const { data, error } = await supabase
+      .from('diagnosticos_pacientes')
+      .select('id, diagnostico, updated_at')
+      .eq('paciente_id', pacienteId)
+      .eq('medico_id', medicoId)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  },
+
+  async guardarDiagnosticoPaciente(pacienteId: string, medicoId: string, diagnostico: string) {
+    const { data, error } = await supabase
+      .from('diagnosticos_pacientes')
+      .upsert(
+        [{ paciente_id: pacienteId, medico_id: medicoId, diagnostico, updated_at: new Date().toISOString() }],
+        { onConflict: 'paciente_id,medico_id' }
+      )
+      .select('id, diagnostico, updated_at')
+      .single();
+
+    if (error) throw error;
+    return data;
+  },
 
   async guardarAtencionClinica(params: {
   citaId?: string | null;
@@ -402,16 +497,6 @@ if (!perfil) {
     await MedicoService.actualizarEstadoCita(params.citaId, 'atendida');
     }
 },
-
-  async crearMedico(medico: any) {
-    const { error } = await supabase.from('medicos').insert([medico]);
-    if (error) throw error;
-  },
-
-  async actualizarMedico(id: string, medico: any) {
-    const { error } = await supabase.from('medicos').update(medico).eq('id', id);
-    if (error) throw error;
-  },
 
   async calcularHorariosDisponiblesReagendamiento(medicoId: string, fecha: string, citaIdExcluir: string) {
     const slots = await MedicoService.generarHorariosDisponibles(medicoId, fecha);
@@ -471,30 +556,35 @@ if (!perfil) {
     if (error) throw error;
   },
 
-  async guardarAccesoMedico(datos: {
-  medicoId?: string;
-  nombre?: string;
-  especialidad?: string;
-  email?: string;
-  telefono?: string;
-  tiene_historia_clinica?: boolean;
-  usuario: string;
-  password: string;
-}) {
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión.');
+  // Registrar (POST) o editar (PATCH, cuando viene medicoId) un médico.
+  // Siempre pasa por el servidor: el navegador nunca escribe en 'medicos' ni decide el rol.
+  async guardarMedicoAdmin(datos: {
+    medicoId?: string;
+    nombre: string;
+    especialidadId: string;
+    email?: string;
+    telefono?: string;
+    tiene_historia_clinica?: boolean;
+    usuario?: string;
+    password?: string;
+  }) {
+    return llamarApiAdmin('/api/admin/medicos', datos.medicoId ? 'PATCH' : 'POST', datos);
+  },
 
-  const res = await fetch('/api/admin/medicos', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(datos),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || 'No se pudo guardar.');
-  return json;
-},
+  // ---------- Mantenedor de especialidades ----------
+  async obtenerEspecialidades(): Promise<Especialidad[]> {
+    const { data, error } = await supabase
+      .from('especialidades')
+      .select('id, nombre, tipo_atencion, activo')
+      .order('nombre', { ascending: true });
+    if (error) throw error;
+    return (data || []) as Especialidad[];
+  },
+
+  // Crear (sin id) o editar (con id). Para eliminar lógicamente: { id, activo: false }
+  async guardarEspecialidad(datos: { id?: string; nombre?: string; tipo_atencion?: string; activo?: boolean }) {
+    const json = await llamarApiAdmin('/api/admin/especialidades', datos.id ? 'PATCH' : 'POST', datos);
+    return json.especialidad as Especialidad;
+  },
 
 };

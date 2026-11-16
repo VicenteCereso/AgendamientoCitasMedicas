@@ -53,6 +53,50 @@ export class EmailService {
     }
   }
 
+  // Un solo correo con todas las fechas de una serie de citas recurrentes
+  static async enviarConfirmacionCitasRecurrentes(params: {
+    emailDestino: string;
+    nombrePaciente: string;
+    nombreMedico: string;
+    tipoConsulta: string;
+    citas: Array<{ fechaHora: string; enlaceVideollamada?: string | null }>;
+  }) {
+    if (!params.emailDestino || !process.env.RESEND_API_KEY || params.citas.length === 0) return;
+
+    try {
+      const resend = getResendClient();
+      const filas = params.citas
+        .map((c) => {
+          const fecha = new Date(c.fechaHora).toLocaleString('es-EC', { dateStyle: 'full', timeStyle: 'short' });
+          const enlace = c.enlaceVideollamada
+            ? ` — <a href="${c.enlaceVideollamada}" target="_blank" style="color: #2563eb;">Unirse</a>`
+            : '';
+          return `<li style="margin-bottom: 6px;">${fecha}${enlace}</li>`;
+        })
+        .join('');
+
+      await resend.emails.send({
+        from: 'vicerafa0428@gmail.com',
+        to: [params.emailDestino],
+        subject: `Confirmación de ${params.citas.length} citas — Dr(a). ${params.nombreMedico}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #f8fafc;">
+            <h2 style="color: #2563eb; text-align: center;">Confirmación de Citas</h2>
+            <p>Estimado/a <strong>${params.nombrePaciente}</strong>,</p>
+            <p>Se han agendado <strong>${params.citas.length}</strong> citas con Dr(a). ${params.nombreMedico}:</p>
+            <div style="background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e1; margin: 20px 0;">
+              <p><strong>Modalidad:</strong> <span style="text-transform: uppercase;">${params.tipoConsulta}</span></p>
+              <ul style="padding-left: 18px;">${filas}</ul>
+            </div>
+            <p style="font-size: 12px; color: #64748b; text-align: center;">Por favor, procure estar 5 minutos antes de cada cita. Si necesita reagendar, comuníquese con el centro médico.</p>
+          </div>
+        `
+      });
+    } catch (err) {
+      console.error('Error enviando correo de citas recurrentes:', err);
+    }
+  }
+
   static async enviarRecetaMedica(params: {
     emailDestino: string;
     nombrePaciente: string;

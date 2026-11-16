@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { MedicoService } from '@/services/medico.service';
+import { MedicoService, type Especialidad, type EstadoFechaRecurrente } from '@/services/medico.service';
 import { EmailService } from '@/services/email.service';
 
 interface CitaDetalle {
@@ -26,6 +26,32 @@ interface ItemMedicamento {
   posologia: string;
 }
 
+// Estado del diagnóstico único (psicología) por cita abierta
+interface DiagnosticoPsico {
+  cargando: boolean;
+  guardado: string | null; // diagnóstico ya registrado en BD (null = aún no existe)
+  borrador: string;
+  editando: boolean;
+  visible: boolean;
+  guardando: boolean;
+}
+
+// Clave del diagnóstico único cuando se usa en el formulario de migración
+const CLAVE_DIAG_MIGRACION = '__migracion__';
+
+// ¿El médico atiende con la pantalla de psicología?
+// Se decide por el tipo de atención de su especialidad (catálogo de especialidades).
+// Si el médico aún no tiene especialidad del catálogo, se usa el nombre como respaldo.
+function esAtencionPsicologica(medico?: { especialidad?: string | null; especialidades?: { tipo_atencion?: string } | null } | null) {
+  const tipo = medico?.especialidades?.tipo_atencion;
+  if (tipo) return tipo === 'psicologica';
+  return (medico?.especialidad || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .includes('psicolog');
+}
+
 export default function PanelMedicoPage() {
   const [tabActiva, setTabActiva] = useState<'citas' | 'agendar_asistente' | 'consultar_expediente' | 'horarios' | 'gestion_medicos'>('citas');
 
@@ -40,6 +66,7 @@ export default function PanelMedicoPage() {
   // Login y Recuperación
   const [emailLogin, setEmailLogin] = useState<string>('');
   const [passwordLogin, setPasswordLogin] = useState<string>('');
+  const [mostrarPasswordLogin, setMostrarPasswordLogin] = useState<boolean>(false);
   const [errorLogin, setErrorLogin] = useState<string>('');
   const [loadingLogin, setLoadingLogin] = useState<boolean>(false);
   const [modoRecuperacion, setModoRecuperacion] = useState<boolean>(false);
@@ -64,10 +91,17 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   // Gestión de Médicos (Admin)
   const [medicoEditandoId, setMedicoEditandoId] = useState<string | null>(null);
   const [nuevoNombre, setNuevoNombre] = useState<string>('');
-  const [nuevaEspecialidad, setNuevaEspecialidad] = useState<string>('');
+  const [nuevaEspecialidadId, setNuevaEspecialidadId] = useState<string>('');
+
+  // Mantenedor de especialidades (Admin)
+  const [especialidades, setEspecialidades] = useState<Especialidad[]>([]);
+  const [espEditandoId, setEspEditandoId] = useState<string | null>(null);
+  const [espNombre, setEspNombre] = useState<string>('');
+  const [espTipo, setEspTipo] = useState<'medica' | 'psicologica'>('medica');
+  const [espMostrarInactivas, setEspMostrarInactivas] = useState<boolean>(false);
+  const [loadingEsp, setLoadingEsp] = useState<boolean>(false);
   const [nuevoEmail, setNuevoEmail] = useState<string>('');
   const [nuevoTelefono, setNuevoTelefono] = useState<string>('');
-  const [nuevoRol, setNuevoRol] = useState<string>('medico');
   const [tieneHistoriaClinicaFlag, setTieneHistoriaClinicaFlag] = useState<boolean>(true);
   const [loadingMedico, setLoadingMedico] = useState<boolean>(false);
 
@@ -115,12 +149,22 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const [diagnosticoHistoricoRetrof, setDiagnosticoHistoricoRetrof] = useState<string>('');
   const [medicamentosRetrof, setMedicamentosRetrof] = useState<ItemMedicamento[]>([{ cantidad: '', medicamento: '', posologia: '' }]);
   const [guardandoHistoricoRetrof, setGuardandoHistoricoRetrof] = useState<boolean>(false);
+  const [proximaSesionRetrof, setProximaSesionRetrof] = useState<string>(''); // solo psicología
 
   const [fechaManual, setFechaManual] = useState<string>('');
   const [horariosManuales, setHorariosManuales] = useState<string[]>([]);
   const [horaManualSeleccionada, setHoraManualSeleccionada] = useState<string>('');
   const [tipoConsultaManual, setTipoConsultaManual] = useState<string>('presencial');
   const [loadingManual, setLoadingManual] = useState<boolean>(false);
+
+  // Citas recurrentes (solo médicos con atención psicológica)
+  const [modoAgendamiento, setModoAgendamiento] = useState<'unica' | 'recurrente'>('unica');
+  const [recDesde, setRecDesde] = useState<string>('');
+  const [recHasta, setRecHasta] = useState<string>('');
+  const [recDias, setRecDias] = useState<number[]>([]); // 0=Domingo ... 6=Sábado
+  const [recHora, setRecHora] = useState<string>('');
+  const [recFechas, setRecFechas] = useState<{ fecha: string; estado: EstadoFechaRecurrente; seleccionada: boolean }[]>([]);
+  const [evaluandoRec, setEvaluandoRec] = useState<boolean>(false);
 
   // Configuración Horarios Multi-Fecha
   const [fechaInputActual, setFechaInputActual] = useState<string>('');
@@ -148,6 +192,10 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const [diagnosticoMap, setDiagnosticoMap] = useState<{ [key: string]: string }>({});
   const [medicamentosMap, setMedicamentosMap] = useState<{ [key: string]: ItemMedicamento[] }>({});
   const [guardandoHistoria, setGuardandoHistoria] = useState<boolean>(false);
+
+  // Atención psicológica: actividades próxima sesión + diagnóstico único
+  const [proximaSesionMap, setProximaSesionMap] = useState<{ [key: string]: string }>({});
+  const [diagPsicoMap, setDiagPsicoMap] = useState<{ [citaId: string]: DiagnosticoPsico }>({});
 
   const [historiasPorCita, setHistoriasPorCita] = useState<{ [citaId: string]: any[] }>({});
   const [historiaSeleccionadaDetalle, setHistoriaSeleccionadaDetalle] = useState<{ [citaId: string]: any }>({});
@@ -187,6 +235,12 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
       if (res.esAdmin && medicosOperativos.length > 0) {
         setMedicoSeleccionadoAdmin(medicosOperativos[0].id);
+      }
+
+      if (res.esAdmin) {
+        MedicoService.obtenerEspecialidades()
+          .then(setEspecialidades)
+          .catch((err) => console.error('No se pudieron cargar las especialidades:', err));
       }
 
       if (targetId) {
@@ -423,9 +477,52 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setMedicamentosRetrof(medicamentosRetrof.filter((_, i) => i !== index));
   }
 
+  async function guardarHistoricoPsicoRetrospectivo() {
+    if (!fechaHistoricaRetrof || !motivoHistoricoRetrof.trim()) {
+      alert('Por favor complete la fecha y las actividades realizadas.');
+      return;
+    }
+    const resuelto = resolverDiagnosticoPsico(CLAVE_DIAG_MIGRACION);
+    if (!resuelto) return;
+
+    setGuardandoHistoricoRetrof(true);
+    try {
+      if (resuelto.pendiente) {
+        await MedicoService.guardarDiagnosticoPaciente(pacienteConsultaLibre.id, medicoAgendaId, resuelto.diag);
+        actualizarDiagPsico(CLAVE_DIAG_MIGRACION, { guardado: resuelto.diag, borrador: resuelto.diag, editando: false });
+      }
+
+      await MedicoService.guardarAtencionClinica({
+        citaId: null,
+        pacienteId: pacienteConsultaLibre.id,
+        medicoId: medicoAgendaId,
+        motivoConsulta: `[MIGRACIÓN HISTÓRICA] ${motivoHistoricoRetrof.trim()}`, // Actividades realizadas
+        diagnostico: resuelto.diag,                                               // Diagnóstico vigente
+        tratamiento: proximaSesionRetrof.trim(),                                  // Actividades próxima sesión
+        fechaRegistro: fechaHistoricaRetrof
+      });
+
+      alert('¡Sesión histórica registrada con éxito en el expediente del paciente!');
+
+      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id);
+      setHistorialConsultaLibre(historialActualizado);
+      if (historialActualizado.length > 0) {
+        setHistoriaLibreSeleccionada(historialActualizado[0]);
+      }
+
+      setModoCrearHistorico(false);
+      setMotivoHistoricoRetrof('');
+      setProximaSesionRetrof('');
+    } catch (err: any) {
+      alert('Error al guardar el registro histórico: ' + err.message);
+    }
+    setGuardandoHistoricoRetrof(false);
+  }
+
   async function guardarHistoricoRetrospectivo(e: React.FormEvent) {
     e.preventDefault();
     if (!pacienteConsultaLibre?.id) return;
+    if (agendaEsPsicologia) return guardarHistoricoPsicoRetrospectivo();
     if (!fechaHistoricaRetrof || !motivoHistoricoRetrof || !diagnosticoHistoricoRetrof) {
       alert('Por favor complete la fecha, el motivo de consulta y el diagnóstico.');
       return;
@@ -471,10 +568,9 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   function seleccionarParaEditarMedico(med: any) {
     setMedicoEditandoId(med.id);
     setNuevoNombre(med.nombre || '');
-    setNuevaEspecialidad(med.especialidad || '');
+    setNuevaEspecialidadId(med.especialidad_id || '');
     setNuevoEmail(med.email || '');
     setNuevoTelefono(med.telefono || '');
-    setNuevoRol(med.rol || 'medico');
     setTieneHistoriaClinicaFlag(med.tiene_historia_clinica ?? true);
     setNuevoUsuario(med.usuario || '');
     setNuevaPassword('');
@@ -483,18 +579,83 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   function limpiarFormularioMedico() {
     setMedicoEditandoId(null);
     setNuevoNombre('');
-    setNuevaEspecialidad('');
+    setNuevaEspecialidadId('');
     setNuevoEmail('');
     setNuevoTelefono('');
-    setNuevoRol('medico');
     setTieneHistoriaClinicaFlag(true);
     setNuevoUsuario('');
     setNuevaPassword('');
   }
 
+  // ---------- Mantenedor de especialidades ----------
+  function limpiarFormularioEspecialidad() {
+    setEspEditandoId(null);
+    setEspNombre('');
+    setEspTipo('medica');
+  }
+
+  function seleccionarEspecialidadParaEditar(esp: Especialidad) {
+    setEspEditandoId(esp.id);
+    setEspNombre(esp.nombre);
+    setEspTipo(esp.tipo_atencion);
+  }
+
+  // Recarga catálogo y médicos (el nombre de la especialidad se copia en cada médico)
+  async function recargarEspecialidadesYMedicos() {
+    const [lista, sesion] = await Promise.all([
+      MedicoService.obtenerEspecialidades(),
+      MedicoService.obtenerSesionYPerfil(),
+    ]);
+    setEspecialidades(lista);
+    setListaMedicos(sesion.listaMedicos);
+    if (sesion.perfilUsuario) setPerfilUsuario(sesion.perfilUsuario);
+  }
+
+  async function guardarEspecialidad() {
+    const nombre = espNombre.trim();
+    if (nombre.length < 3) {
+      alert('Escribe un nombre de al menos 3 caracteres.');
+      return;
+    }
+    setLoadingEsp(true);
+    try {
+      await MedicoService.guardarEspecialidad(
+        espEditandoId ? { id: espEditandoId, nombre, tipo_atencion: espTipo } : { nombre, tipo_atencion: espTipo }
+      );
+      limpiarFormularioEspecialidad();
+      await recargarEspecialidadesYMedicos();
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+    setLoadingEsp(false);
+  }
+
+  async function cambiarEstadoEspecialidad(esp: Especialidad, activo: boolean) {
+    if (!activo) {
+      const enUso = listaMedicos.filter((m: any) => m.especialidad_id === esp.id).length;
+      const aviso = enUso > 0
+        ? `\n\n${enUso} médico(s) la tienen asignada: la conservarán, pero ya no se podrá asignar a nuevos médicos.`
+        : '';
+      if (!confirm(`¿Desactivar la especialidad "${esp.nombre}"?${aviso}`)) return;
+    }
+    setLoadingEsp(true);
+    try {
+      await MedicoService.guardarEspecialidad({ id: esp.id, activo });
+      if (!activo && espEditandoId === esp.id) limpiarFormularioEspecialidad();
+      await recargarEspecialidadesYMedicos();
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+    setLoadingEsp(false);
+  }
+
   async function guardarMedicoAdmin() {
   if (!nuevoNombre.trim()) {
     alert('Completa el nombre.');
+    return;
+  }
+  if (!nuevaEspecialidadId) {
+    alert('Selecciona la especialidad del médico.');
     return;
   }
   const usuario = nuevoUsuario.trim().toLowerCase();
@@ -510,35 +671,17 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
   setLoadingMedico(true);
   try {
-    if (medicoEditandoId) {
-      await MedicoService.actualizarMedico(medicoEditandoId, {
-        nombre: nuevoNombre,
-        especialidad: nuevaEspecialidad,
-        email: nuevoEmail.trim() || null,
-        telefono: nuevoTelefono,
-        rol: nuevoRol,
-        tiene_historia_clinica: tieneHistoriaClinicaFlag
-      });
-      if (nuevaPassword) {
-        await MedicoService.guardarAccesoMedico({
-          medicoId: medicoEditandoId,
-          usuario,
-          password: nuevaPassword
-        });
-      }
-      alert('¡Médico actualizado!');
-    } else {
-      await MedicoService.guardarAccesoMedico({
-        nombre: nuevoNombre,
-        especialidad: nuevaEspecialidad,
-        email: nuevoEmail,
-        telefono: nuevoTelefono,
-        tiene_historia_clinica: tieneHistoriaClinicaFlag,
-        usuario,
-        password: nuevaPassword
-      });
-      alert(`¡Médico registrado! Usuario: ${usuario}`);
-    }
+    await MedicoService.guardarMedicoAdmin({
+      medicoId: medicoEditandoId || undefined,
+      nombre: nuevoNombre,
+      especialidadId: nuevaEspecialidadId,
+      email: nuevoEmail,
+      telefono: nuevoTelefono,
+      tiene_historia_clinica: tieneHistoriaClinicaFlag,
+      usuario,
+      password: nuevaPassword
+    });
+    alert(medicoEditandoId ? '¡Médico actualizado!' : `¡Médico registrado! Usuario: ${usuario}`);
     limpiarFormularioMedico();
     await inicializar();
   } catch (err: any) {
@@ -593,7 +736,400 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     });
   }
 
+  // Médico cuya agenda se está gestionando (el seleccionado por el admin, o el propio médico).
+  // Lo usan el formulario de migración y el agendamiento manual.
+  const medicoAgendaId: string = (esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id) || '';
+  const agendaEsPsicologia = medicoEsPsicologia(medicoAgendaId);
+
+  // Al abrir el formulario de migración de un psicólogo, cargar el diagnóstico único del paciente
+  useEffect(() => {
+    if (modoCrearHistorico && agendaEsPsicologia && pacienteConsultaLibre?.id && medicoAgendaId) {
+      cargarDiagPsico(CLAVE_DIAG_MIGRACION, pacienteConsultaLibre.id, medicoAgendaId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modoCrearHistorico, agendaEsPsicologia, pacienteConsultaLibre?.id, medicoAgendaId]);
+
+  // ---------- Atención psicológica ----------
+  // El diagnóstico único se maneja con una "clave": el id de la cita (Citas Activas)
+  // o CLAVE_DIAG_MIGRACION (formulario de migración en Buscar Expediente).
+  function medicoEsPsicologia(medicoId?: string | null) {
+    if (!medicoId) return false;
+    const medico =
+      medicoId === perfilUsuario?.id
+        ? perfilUsuario
+        : listaMedicos.find((m: any) => m.id === medicoId);
+    return esAtencionPsicologica(medico);
+  }
+
+  function citaEsPsicologia(cita: CitaDetalle) {
+    return medicoEsPsicologia(cita.medico_id);
+  }
+
+  function actualizarDiagPsico(clave: string, cambios: Partial<DiagnosticoPsico>) {
+    setDiagPsicoMap((prev) => ({ ...prev, [clave]: { ...prev[clave], ...cambios } }));
+  }
+
+  async function cargarDiagPsico(clave: string, pacienteId: string, medicoId: string) {
+    setDiagPsicoMap((prev) => ({
+      ...prev,
+      [clave]: { cargando: true, guardado: null, borrador: '', editando: false, visible: false, guardando: false },
+    }));
+    try {
+      const diag = await MedicoService.obtenerDiagnosticoPaciente(pacienteId, medicoId);
+      actualizarDiagPsico(clave, {
+        cargando: false,
+        guardado: diag?.diagnostico ?? null,
+        borrador: diag?.diagnostico ?? '',
+      });
+    } catch (err: any) {
+      actualizarDiagPsico(clave, { cargando: false });
+      alert('No se pudo cargar el diagnóstico: ' + err.message);
+    }
+  }
+
+  async function guardarDiagnosticoEditado(clave: string, pacienteId: string, medicoId: string) {
+    const texto = (diagPsicoMap[clave]?.borrador || '').trim();
+    if (!texto) {
+      alert('El diagnóstico no puede quedar vacío.');
+      return;
+    }
+    actualizarDiagPsico(clave, { guardando: true });
+    try {
+      const diag = await MedicoService.guardarDiagnosticoPaciente(pacienteId, medicoId, texto);
+      actualizarDiagPsico(clave, { guardando: false, editando: false, visible: true, guardado: diag.diagnostico, borrador: diag.diagnostico });
+    } catch (err: any) {
+      actualizarDiagPsico(clave, { guardando: false });
+      alert('No se pudo guardar el diagnóstico: ' + err.message);
+    }
+  }
+
+  // Devuelve el diagnóstico a usar y si hay que guardarlo (primera vez o edición pendiente).
+  // Devuelve null (y avisa) si falta información.
+  function resolverDiagnosticoPsico(clave: string): { diag: string; pendiente: boolean } | null {
+    const estado = diagPsicoMap[clave];
+    if (!estado || estado.cargando) {
+      alert('Espera a que cargue el diagnóstico.');
+      return null;
+    }
+    const pendiente = estado.guardado === null || estado.editando;
+    const diag = (pendiente ? estado.borrador : estado.guardado || '').trim();
+    if (!diag) {
+      alert('Por favor registra el diagnóstico del paciente.');
+      return null;
+    }
+    return { diag, pendiente };
+  }
+
+  async function abrirAtencion(cita: CitaDetalle) {
+    if (citaAtendiendoId === cita.id) {
+      setCitaAtendiendoId(null);
+      return;
+    }
+    setCitaAtendiendoId(cita.id);
+    if (citaEsPsicologia(cita)) {
+      await cargarDiagPsico(cita.id, cita.pacientes.id, cita.medico_id);
+    }
+  }
+
+  async function guardarYFinalizarSesionPsico(cita: CitaDetalle) {
+    const actividades = (motivoConsultaMap[cita.id] || '').trim();
+    const proxima = (proximaSesionMap[cita.id] || '').trim();
+
+    if (!actividades) {
+      alert('Por favor ingresa las actividades realizadas.');
+      return;
+    }
+    const resuelto = resolverDiagnosticoPsico(cita.id);
+    if (!resuelto) return;
+
+    setGuardandoHistoria(true);
+    try {
+      if (resuelto.pendiente) {
+        await MedicoService.guardarDiagnosticoPaciente(cita.pacientes.id, cita.medico_id, resuelto.diag);
+      }
+
+      await MedicoService.guardarAtencionClinica({
+        citaId: cita.id,
+        pacienteId: cita.pacientes.id,
+        medicoId: cita.medico_id,
+        motivoConsulta: actividades,  // Actividades realizadas
+        diagnostico: resuelto.diag,   // Copia del diagnóstico vigente
+        tratamiento: proxima          // Actividades próxima sesión
+      });
+
+      alert('¡Sesión registrada con éxito!');
+      setCitaAtendiendoId(null);
+
+      const targetId = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
+      if (targetId) cargarAgenda(targetId);
+    } catch (err: any) {
+      alert('Error al guardar: ' + err.message);
+    }
+    setGuardandoHistoria(false);
+  }
+
+  // Selector de fecha/hora del agendamiento manual.
+  // Médicos con atención psicológica pueden elegir entre cita única y citas recurrentes.
+  function renderSelectorAgendamiento(esPacienteNuevo: boolean) {
+    const modo = agendaEsPsicologia ? modoAgendamiento : 'unica';
+    const colorBoton = esPacienteNuevo ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700';
+    const seleccionadas = recFechas.filter((f) => f.seleccionada).length;
+    const etiquetaEstado: Record<EstadoFechaRecurrente, { texto: string; clase: string }> = {
+      disponible: { texto: 'Disponible', clase: 'bg-emerald-100 text-emerald-700' },
+      fuera_horario: { texto: 'Fuera de horario', clase: 'bg-amber-100 text-amber-700' },
+      ocupada: { texto: 'Ocupada', clase: 'bg-rose-100 text-rose-700' },
+      pasada: { texto: 'Ya pasó', clase: 'bg-slate-200 text-slate-600' },
+    };
+
+    return (
+      <div className="space-y-3 pt-2">
+        {agendaEsPsicologia && (
+          <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
+            {(['unica', 'recurrente'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setModoAgendamiento(m)}
+                className={`py-2 text-xs font-bold rounded-lg transition ${modo === m ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                {m === 'unica' ? '📅 Cita única' : '🔁 Citas recurrentes'}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {modo === 'unica' ? (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Fecha de Cita</label>
+                <input type="date" value={fechaManual} onChange={(e) => setFechaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Modalidad</label>
+                <select value={tipoConsultaManual} onChange={(e) => setTipoConsultaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold">
+                  <option value="presencial">Presencial</option>
+                  <option value="telemedicina">Telemedicina</option>
+                </select>
+              </div>
+            </div>
+
+            {fechaManual && (
+              <div className="space-y-1">
+                <label className="block text-[11px] font-bold text-slate-600 uppercase">Horarios Disponibles</label>
+                {horariosManuales.length === 0 ? (
+                  <p className="text-xs text-rose-500 font-bold py-2">No hay turnos configurados para esta fecha.</p>
+                ) : (
+                  <div className="grid grid-cols-4 gap-2 max-h-36 overflow-y-auto">
+                    {horariosManuales.map((h) => (
+                      <button key={h} type="button" onClick={() => setHoraManualSeleccionada(h)} className={`p-2 text-xs font-bold rounded-xl border transition ${horaManualSeleccionada === h ? 'bg-blue-600 text-white border-blue-600 shadow' : 'bg-slate-50 hover:bg-slate-100 text-slate-700'}`}>{h}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button onClick={guardarCitaManual} disabled={loadingManual || !horaManualSeleccionada} className={`w-full ${colorBoton} disabled:opacity-50 text-white text-xs font-bold py-3.5 rounded-xl shadow-sm transition`}>
+              {loadingManual
+                ? (esPacienteNuevo ? 'Registrando y Agendando...' : 'Agendando y Notificando...')
+                : (esPacienteNuevo ? '💾 Registrar Paciente, Agendar y Notificar' : '💾 Confirmar Cita y Enviar Correo')}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Desde</label>
+                <input type="date" value={recDesde} onChange={(e) => cambiarParametroRecurrencia(() => setRecDesde(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Hasta</label>
+                <input type="date" value={recHasta} min={recDesde || undefined} onChange={(e) => cambiarParametroRecurrencia(() => setRecHasta(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-[11px] font-bold text-slate-600 uppercase">Días de la semana</label>
+                <div className="flex gap-2 text-[10px] font-bold">
+                  <button type="button" onClick={() => cambiarParametroRecurrencia(() => setRecDias([0, 1, 2, 3, 4, 5, 6]))} className="text-violet-700 hover:underline">Todos</button>
+                  <button type="button" onClick={() => cambiarParametroRecurrencia(() => setRecDias([1, 2, 3, 4, 5]))} className="text-violet-700 hover:underline">Lun–Vie</button>
+                  <button type="button" onClick={() => cambiarParametroRecurrencia(() => setRecDias([]))} className="text-slate-500 hover:underline">Ninguno</button>
+                </div>
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {[1, 2, 3, 4, 5, 6, 0].map((d) => {
+                  const activo = recDias.includes(d);
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => cambiarParametroRecurrencia(() => setRecDias(activo ? recDias.filter((x) => x !== d) : [...recDias, d]))}
+                      className={`py-2 text-[11px] font-bold rounded-lg border transition ${activo ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+                    >
+                      {NOMBRES_DIAS[d]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Hora</label>
+                <input type="time" value={recHora} step={300} onChange={(e) => cambiarParametroRecurrencia(() => setRecHora(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Modalidad</label>
+                <select value={tipoConsultaManual} onChange={(e) => setTipoConsultaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold">
+                  <option value="presencial">Presencial</option>
+                  <option value="telemedicina">Telemedicina</option>
+                </select>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={previsualizarRecurrencia}
+              disabled={evaluandoRec}
+              className="w-full bg-violet-50 hover:bg-violet-100 text-violet-700 border border-violet-200 text-xs font-bold py-2.5 rounded-xl transition"
+            >
+              {evaluandoRec ? 'Revisando disponibilidad...' : '🔍 Revisar fechas'}
+            </button>
+
+            {recFechas.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-[11px] font-bold text-slate-600 uppercase">{seleccionadas} de {recFechas.length} fechas seleccionadas</span>
+                </div>
+                <div className="max-h-56 overflow-y-auto border rounded-xl divide-y divide-slate-100 bg-white">
+                  {recFechas.map((rf, i) => {
+                    const [a, m, d] = rf.fecha.split('-').map(Number);
+                    const bloqueada = rf.estado === 'ocupada' || rf.estado === 'pasada';
+                    return (
+                      <label key={rf.fecha} className={`flex items-center justify-between gap-2 px-3 py-2 text-xs ${bloqueada ? 'opacity-60' : 'cursor-pointer hover:bg-slate-50'}`}>
+                        <span className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={rf.seleccionada}
+                            disabled={bloqueada}
+                            onChange={(e) => setRecFechas((prev) => prev.map((x, j) => (j === i ? { ...x, seleccionada: e.target.checked } : x)))}
+                            className="w-3.5 h-3.5 rounded"
+                          />
+                          <span className="font-semibold text-slate-800 capitalize">
+                            {new Date(a, m - 1, d).toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · {recHora}
+                          </span>
+                        </span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${etiquetaEstado[rf.estado].clase}`}>
+                          {etiquetaEstado[rf.estado].texto}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {recFechas.some((x) => x.estado === 'fuera_horario') && (
+                  <p className="text-[11px] text-amber-700">
+                    &quot;Fuera de horario&quot;: esa fecha no tiene un turno configurado a esa hora en Configurar Horarios. Puedes marcarla igualmente si lo deseas.
+                  </p>
+                )}
+
+                <button
+                  onClick={guardarCitasRecurrentes}
+                  disabled={loadingManual || seleccionadas === 0}
+                  className={`w-full ${colorBoton} disabled:opacity-50 text-white text-xs font-bold py-3.5 rounded-xl shadow-sm transition`}
+                >
+                  {loadingManual
+                    ? 'Agendando citas...'
+                    : `💾 ${esPacienteNuevo ? 'Registrar Paciente y ' : ''}Agendar ${seleccionadas} cita(s)`}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Bloque visual del diagnóstico único (se usa en Citas Activas y en Migración)
+  function renderDiagnosticoPsico(clave: string, pacienteId: string, medicoId: string) {
+    const dp = diagPsicoMap[clave];
+    return (
+      <div className="p-4 bg-white rounded-xl border border-violet-100 space-y-2">
+        {!dp || dp.cargando ? (
+          <p className="text-xs text-slate-500 animate-pulse">Cargando diagnóstico...</p>
+        ) : dp.guardado === null ? (
+          <>
+            <label className="block text-[11px] font-bold text-slate-700">
+              Diagnóstico <span className="font-medium text-slate-500">(se registra una sola vez; luego podrás verlo y editarlo)</span>
+            </label>
+            <textarea
+              value={dp.borrador}
+              onChange={(e) => actualizarDiagPsico(clave, { borrador: e.target.value })}
+              placeholder="Ej: Trastorno de ansiedad generalizada..."
+              className="w-full p-3 border rounded-xl text-xs font-medium h-20 bg-white"
+            />
+          </>
+        ) : dp.editando ? (
+          <>
+            <label className="block text-[11px] font-bold text-slate-700">Editar diagnóstico</label>
+            <textarea
+              value={dp.borrador}
+              onChange={(e) => actualizarDiagPsico(clave, { borrador: e.target.value })}
+              className="w-full p-3 border rounded-xl text-xs font-medium h-20 bg-white"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => actualizarDiagPsico(clave, { editando: false, borrador: dp.guardado || '' })}
+                className="bg-slate-200 text-[11px] font-bold py-1.5 px-3 rounded-lg"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => guardarDiagnosticoEditado(clave, pacienteId, medicoId)}
+                disabled={dp.guardando}
+                className="bg-violet-600 hover:bg-violet-700 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg"
+              >
+                {dp.guardando ? 'Guardando...' : 'Guardar diagnóstico'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex justify-between items-center">
+              <span className="text-[11px] font-bold text-slate-700">✅ Diagnóstico registrado</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => actualizarDiagPsico(clave, { visible: !dp.visible })}
+                  className="text-[11px] font-bold text-violet-700 bg-violet-50 px-3 py-1 rounded-lg hover:bg-violet-100"
+                >
+                  {dp.visible ? '🙈 Ocultar' : '👁️ Ver'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => actualizarDiagPsico(clave, { editando: true, visible: true, borrador: dp.guardado || '' })}
+                  className="text-[11px] font-bold text-slate-700 bg-slate-100 px-3 py-1 rounded-lg hover:bg-slate-200"
+                >
+                  ✏️ Editar
+                </button>
+              </div>
+            </div>
+            {dp.visible && (
+              <div className="whitespace-pre-wrap text-xs font-medium text-slate-800 bg-violet-50/50 p-3 rounded-lg border border-violet-100">
+                {dp.guardado}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
   async function guardarYFinalizarAtencion(cita: CitaDetalle) {
+    if (citaEsPsicologia(cita)) return guardarYFinalizarSesionPsico(cita);
+
     const motivo = motivoConsultaMap[cita.id] || '';
     const diag = diagnosticoMap[cita.id] || '';
     const meds = medicamentosMap[cita.id] || [{ cantidad: '', medicamento: '', posologia: '' }];
@@ -772,6 +1308,145 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     }
   }, [fechaManual, medicoSeleccionadoAdmin, perfilUsuario]);
 
+  // Devuelve el paciente seleccionado o lo registra si es nuevo. null = faltan datos (ya se avisó).
+  async function obtenerOCrearPacienteManual(): Promise<{ id: string; email?: string; nombre?: string } | null> {
+    if (pacienteEncontrado?.id) {
+      return { id: pacienteEncontrado.id, email: pacienteEncontrado.email, nombre: pacienteEncontrado.nombre };
+    }
+    if (!nombreNuevoPac || !telefonoNuevoPac || !emailNuevoPac) {
+      alert('Por favor completa nombre, teléfono y correo electrónico del paciente.');
+      return null;
+    }
+    const nuevoPac = await MedicoService.crearPaciente({
+      nombre: nombreNuevoPac,
+      cedula: cedulaBusquedaManual,
+      telefono: telefonoNuevoPac,
+      email: emailNuevoPac
+    });
+    // Si luego falla el agendamiento, el paciente ya queda registrado y seleccionado
+    setPacienteEncontrado(nuevoPac);
+    return { id: nuevoPac.id, email: emailNuevoPac, nombre: nombreNuevoPac };
+  }
+
+  function limpiarAgendamientoManual() {
+    setCedulaBusquedaManual('');
+    setPacienteEncontrado(null);
+    setNombreNuevoPac('');
+    setTelefonoNuevoPac('');
+    setEmailNuevoPac('');
+    setFechaManual('');
+    setHoraManualSeleccionada('');
+    setModoAgendamiento('unica');
+    setRecDesde('');
+    setRecHasta('');
+    setRecDias([]);
+    setRecHora('');
+    setRecFechas([]);
+  }
+
+  // ---------- Citas recurrentes ----------
+  const NOMBRES_DIAS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+  const MAX_CITAS_SERIE = 60;
+
+  // Cualquier cambio en los parámetros invalida la vista previa
+  function cambiarParametroRecurrencia(aplicar: () => void) {
+    aplicar();
+    setRecFechas([]);
+  }
+
+  function generarFechasRecurrentes(): string[] {
+    const [a1, m1, d1] = recDesde.split('-').map(Number);
+    const [a2, m2, d2] = recHasta.split('-').map(Number);
+    const actual = new Date(a1, m1 - 1, d1);
+    const fin = new Date(a2, m2 - 1, d2);
+    const fechas: string[] = [];
+    while (actual <= fin && fechas.length <= MAX_CITAS_SERIE) {
+      if (recDias.includes(actual.getDay())) {
+        fechas.push(`${actual.getFullYear()}-${String(actual.getMonth() + 1).padStart(2, '0')}-${String(actual.getDate()).padStart(2, '0')}`);
+      }
+      actual.setDate(actual.getDate() + 1);
+    }
+    return fechas;
+  }
+
+  async function previsualizarRecurrencia() {
+    if (!medicoAgendaId) return;
+    if (!recDesde || !recHasta || !recHora || recDias.length === 0) {
+      alert('Completa fecha desde, fecha hasta, la hora y al menos un día de la semana.');
+      return;
+    }
+    if (recHasta < recDesde) {
+      alert('La fecha "hasta" debe ser igual o posterior a la fecha "desde".');
+      return;
+    }
+    const fechas = generarFechasRecurrentes();
+    if (fechas.length === 0) {
+      alert('No hay fechas que coincidan con los días seleccionados en ese rango.');
+      return;
+    }
+    if (fechas.length > MAX_CITAS_SERIE) {
+      alert(`El rango genera más de ${MAX_CITAS_SERIE} citas. Reduce el rango o los días seleccionados.`);
+      return;
+    }
+
+    setEvaluandoRec(true);
+    try {
+      const evaluadas = await MedicoService.evaluarFechasRecurrentes(medicoAgendaId, fechas, recHora);
+      setRecFechas(evaluadas.map((e) => ({ ...e, seleccionada: e.estado === 'disponible' })));
+    } catch (err: any) {
+      alert('No se pudieron revisar las fechas: ' + err.message);
+    }
+    setEvaluandoRec(false);
+  }
+
+  async function guardarCitasRecurrentes() {
+    if (!medicoAgendaId) return;
+    const fechas = recFechas.filter((f) => f.seleccionada).map((f) => f.fecha);
+    if (fechas.length === 0) {
+      alert('Selecciona al menos una fecha.');
+      return;
+    }
+    const fueraHorario = recFechas.filter((f) => f.seleccionada && f.estado === 'fuera_horario').length;
+    if (fueraHorario > 0 && !confirm(`${fueraHorario} fecha(s) están fuera del horario configurado. ¿Agendarlas de todas formas?`)) {
+      return;
+    }
+
+    setLoadingManual(true);
+    try {
+      const pac = await obtenerOCrearPacienteManual();
+      if (!pac) {
+        setLoadingManual(false);
+        return;
+      }
+
+      const { citas } = await MedicoService.agendarCitasRecurrentes({
+        medico_id: medicoAgendaId,
+        paciente_id: pac.id,
+        fechas,
+        hora: recHora,
+        tipo_consulta: tipoConsultaManual
+      });
+
+      if (pac.email) {
+        await EmailService.enviarConfirmacionCitasRecurrentes({
+          emailDestino: pac.email,
+          nombrePaciente: pac.nombre || '',
+          nombreMedico: perfilUsuario?.nombre || 'Médico Tratante',
+          tipoConsulta: tipoConsultaManual,
+          citas: citas.map((c: any) => ({ fechaHora: c.fecha_hora, enlaceVideollamada: c.enlace_videollamada }))
+        });
+      }
+
+      alert(`¡Se agendaron ${citas.length} citas recurrentes!`);
+      limpiarAgendamientoManual();
+      cargarAgenda(medicoAgendaId);
+      setTabActiva('citas');
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+    setLoadingManual(false);
+  }
+
   async function guardarCitaManual() {
     const targetId = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
     if (!targetId || !fechaManual || !horaManualSeleccionada) {
@@ -781,26 +1456,14 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
     setLoadingManual(true);
     try {
-      let pacId = pacienteEncontrado?.id;
-      let emailPacObj = pacienteEncontrado?.email;
-      let nombrePacObj = pacienteEncontrado?.nombre;
-
-      if (!pacId) {
-        if (!nombreNuevoPac || !telefonoNuevoPac || !emailNuevoPac) {
-          alert('Por favor completa nombre, teléfono y correo electrónico del paciente.');
-          setLoadingManual(false);
-          return;
-        }
-        const nuevoPac = await MedicoService.crearPaciente({
-          nombre: nombreNuevoPac,
-          cedula: cedulaBusquedaManual,
-          telefono: telefonoNuevoPac,
-          email: emailNuevoPac
-        });
-        pacId = nuevoPac.id;
-        emailPacObj = emailNuevoPac;
-        nombrePacObj = nombreNuevoPac;
+      const pac = await obtenerOCrearPacienteManual();
+      if (!pac) {
+        setLoadingManual(false);
+        return;
       }
+      const pacId = pac.id;
+      const emailPacObj = pac.email;
+      const nombrePacObj = pac.nombre || '';
 
       const fechaHoraISO = `${fechaManual}T${horaManualSeleccionada}:00`;
       let enlaceJitsi = null;
@@ -830,13 +1493,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       }
 
       alert('¡Cita agendada y notificación por correo enviada con éxito!');
-      setCedulaBusquedaManual('');
-      setPacienteEncontrado(null);
-      setNombreNuevoPac('');
-      setTelefonoNuevoPac('');
-      setEmailNuevoPac('');
-      setFechaManual('');
-      setHoraManualSeleccionada('');
+      limpiarAgendamientoManual();
       cargarAgenda(targetId);
       setTabActiva('citas');
     } catch (err: any) {
@@ -934,12 +1591,12 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
           {!modoRecuperacion ? (
             <form onSubmit={ejecutarLogin} className="space-y-4">
               <div className="space-y-1.5">
-                <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider">Correo Electrónico</label>
-                <input 
-                  type="text" 
-                  value={emailLogin} 
-                  onChange={(e) => setEmailLogin(e.target.value)} 
-                  placeholder="doctor@clinica.com" 
+                <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider">Usuario o Correo</label>
+                <input
+                  type="text"
+                  value={emailLogin}
+                  onChange={(e) => setEmailLogin(e.target.value)}
+                  placeholder="dr.perez"
                   autoComplete="username"
                   className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-semibold text-slate-800 focus:bg-white focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 outline-none transition" 
                   required 
@@ -957,14 +1614,38 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                     ¿Olvidaste tu contraseña?
                   </button>
                 </div>
-                <input 
-                  type="password" 
-                  value={passwordLogin} 
-                  onChange={(e) => setPasswordLogin(e.target.value)} 
-                  placeholder="••••••••" 
-                  className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-semibold text-slate-800 focus:bg-white focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 outline-none transition" 
-                  required 
-                />
+                <div className="relative">
+                  <input
+                    type={mostrarPasswordLogin ? 'text' : 'password'}
+                    value={passwordLogin}
+                    onChange={(e) => setPasswordLogin(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete="current-password"
+                    className="w-full p-3.5 pr-12 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-semibold text-slate-800 focus:bg-white focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 outline-none transition"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setMostrarPasswordLogin((v) => !v)}
+                    aria-label={mostrarPasswordLogin ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                    title={mostrarPasswordLogin ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                    className="absolute inset-y-0 right-0 px-4 flex items-center text-slate-400 hover:text-blue-600 transition"
+                  >
+                    {mostrarPasswordLogin ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+                        <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                        <line x1="1" y1="1" x2="23" y2="23" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
               </div>
 
               <button 
@@ -1202,14 +1883,14 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                           </button>
 
                           <button
-                            onClick={() => setCitaAtendiendoId(citaAtendiendoId === c.id ? null : c.id)}
+                            onClick={() => abrirAtencion(c)}
                             className={`text-xs font-bold py-2 px-4 rounded-xl shadow-sm transition flex items-center gap-1.5 ${
                               citaAtendiendoId === c.id 
                                 ? 'bg-slate-800 text-white' 
                                 : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20'
                             }`}
                           >
-                            {citaAtendiendoId === c.id ? '✕ Cancelar' : '✍️ Atender / Recetar'}
+                            {citaAtendiendoId === c.id ? '✕ Cancelar' : citaEsPsicologia(c) ? '✍️ Atender Sesión' : '✍️ Atender / Recetar'}
                           </button>
 
                           <div className="relative">
@@ -1277,10 +1958,10 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                                       <span>👨‍⚕️ Dr(a). {historiaSeleccionadaDetalle[c.id].medicos?.nombre}</span>
                                       <span>{historiaSeleccionadaDetalle[c.id].medicos?.especialidad}</span>
                                     </div>
-                                    <p><strong>Motivo:</strong> {historiaSeleccionadaDetalle[c.id].motivo_consulta}</p>
+                                    <p><strong>{esAtencionPsicologica(historiaSeleccionadaDetalle[c.id].medicos) ? 'Actividades realizadas:' : 'Motivo:'}</strong> <span className="whitespace-pre-wrap">{historiaSeleccionadaDetalle[c.id].motivo_consulta}</span></p>
                                     <p><strong>Diagnóstico:</strong> {historiaSeleccionadaDetalle[c.id].diagnostico}</p>
                                     <div>
-                                      <strong>Tratamiento / Receta:</strong>
+                                      <strong>{esAtencionPsicologica(historiaSeleccionadaDetalle[c.id].medicos) ? 'Actividades próxima sesión:' : 'Tratamiento / Receta:'}</strong>
                                       <div className="whitespace-pre-wrap font-medium text-slate-800 pt-1">
                                         {historiaSeleccionadaDetalle[c.id].tratamiento_prescripcion || 'Ninguno'}
                                       </div>
@@ -1295,8 +1976,53 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                         </div>
                       )}
 
+                      {/* ATENCIÓN PSICOLÓGICA (sin receta, diagnóstico único) */}
+                      {citaAtendiendoId === c.id && citaEsPsicologia(c) && (() => {
+                        const dp = diagPsicoMap[c.id];
+                        return (
+                        <div className="p-5 bg-slate-50 rounded-2xl border border-violet-100 space-y-4">
+                          <h4 className="text-xs font-extrabold text-violet-900 uppercase tracking-wider">🧠 Sesión Psicológica — {c.pacientes?.nombre}</h4>
+
+                          {/* Diagnóstico único */}
+                          {renderDiagnosticoPsico(c.id, c.pacientes.id, c.medico_id)}
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-[11px] font-bold text-slate-700 mb-1">Actividades Realizadas</label>
+                              <textarea
+                                value={motivoConsultaMap[c.id] || ''}
+                                onChange={(e) => setMotivoConsultaMap({ ...motivoConsultaMap, [c.id]: e.target.value })}
+                                placeholder="Ej: Se trabajó técnica de respiración y reestructuración cognitiva..."
+                                className="w-full p-3 border rounded-xl text-xs font-medium h-24 bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-bold text-slate-700 mb-1">Actividades Próxima Sesión</label>
+                              <textarea
+                                value={proximaSesionMap[c.id] || ''}
+                                onChange={(e) => setProximaSesionMap({ ...proximaSesionMap, [c.id]: e.target.value })}
+                                placeholder="Ej: Revisar registro de pensamientos, iniciar exposición gradual..."
+                                className="w-full p-3 border rounded-xl text-xs font-medium h-24 bg-white"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex justify-end gap-2 pt-2">
+                            <button onClick={() => setCitaAtendiendoId(null)} className="bg-slate-200 text-xs font-bold py-2.5 px-4 rounded-xl">Cancelar</button>
+                            <button
+                              onClick={() => guardarYFinalizarAtencion(c)}
+                              disabled={guardandoHistoria || !dp || dp.cargando}
+                              className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-bold py-2.5 px-5 rounded-xl shadow-sm transition"
+                            >
+                              {guardandoHistoria ? 'Guardando...' : '💾 Finalizar Sesión'}
+                            </button>
+                          </div>
+                        </div>
+                        );
+                      })()}
+
                       {/* ATENCIÓN Y RECETA */}
-                      {citaAtendiendoId === c.id && (
+                      {citaAtendiendoId === c.id && !citaEsPsicologia(c) && (
                         <div className="p-5 bg-slate-50 rounded-2xl border border-blue-100 space-y-4">
                           <h4 className="text-xs font-extrabold text-blue-900 uppercase tracking-wider">🩺 Consulta Actual y Receta Médica — {c.pacientes?.nombre}</h4>
                           
@@ -1493,38 +2219,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                       </button>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 pt-2">
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Fecha de Cita</label>
-                        <input type="date" value={fechaManual} onChange={(e) => setFechaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Modalidad</label>
-                        <select value={tipoConsultaManual} onChange={(e) => setTipoConsultaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold">
-                          <option value="presencial">Presencial</option>
-                          <option value="telemedicina">Telemedicina</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {fechaManual && (
-                      <div className="space-y-1">
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase">Horarios Disponibles</label>
-                        {horariosManuales.length === 0 ? (
-                          <p className="text-xs text-rose-500 font-bold py-2">No hay turnos configurados para esta fecha.</p>
-                        ) : (
-                          <div className="grid grid-cols-4 gap-2 max-h-36 overflow-y-auto">
-                            {horariosManuales.map((h) => (
-                              <button key={h} type="button" onClick={() => setHoraManualSeleccionada(h)} className={`p-2 text-xs font-bold rounded-xl border transition ${horaManualSeleccionada === h ? 'bg-blue-600 text-white border-blue-600 shadow' : 'bg-slate-50 hover:bg-slate-100 text-slate-700'}`}>{h}</button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <button onClick={guardarCitaManual} disabled={loadingManual || !horaManualSeleccionada} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold py-3.5 rounded-xl shadow-sm transition">
-                      {loadingManual ? 'Agendando y Notificando...' : '💾 Confirmar Cita y Enviar Correo'}
-                    </button>
+                    {renderSelectorAgendamiento(false)}
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -1537,38 +2232,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                     <input type="text" placeholder="Teléfono" value={telefonoNuevoPac} onChange={(e) => setTelefonoNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
                     <input type="email" placeholder="Correo electrónico (para notificaciones)" value={emailNuevoPac} onChange={(e) => setEmailNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
 
-                    <div className="grid grid-cols-2 gap-2 pt-2">
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Fecha de Cita</label>
-                        <input type="date" value={fechaManual} onChange={(e) => setFechaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Modalidad</label>
-                        <select value={tipoConsultaManual} onChange={(e) => setTipoConsultaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold">
-                          <option value="presencial">Presencial</option>
-                          <option value="telemedicina">Telemedicina</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {fechaManual && (
-                      <div className="space-y-1">
-                        <label className="block text-[11px] font-bold text-slate-600 uppercase">Horarios Disponibles</label>
-                        {horariosManuales.length === 0 ? (
-                          <p className="text-xs text-rose-500 font-bold py-2">No hay turnos configurados para esta fecha.</p>
-                        ) : (
-                          <div className="grid grid-cols-4 gap-2 max-h-36 overflow-y-auto">
-                            {horariosManuales.map((h) => (
-                              <button key={h} type="button" onClick={() => setHoraManualSeleccionada(h)} className={`p-2 text-xs font-bold rounded-xl border transition ${horaManualSeleccionada === h ? 'bg-blue-600 text-white border-blue-600 shadow' : 'bg-slate-50 hover:bg-slate-100 text-slate-700'}`}>{h}</button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <button onClick={guardarCitaManual} disabled={loadingManual || !horaManualSeleccionada} className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold py-3.5 rounded-xl shadow-sm transition">
-                      {loadingManual ? 'Registrando y Agendando...' : '💾 Registrar Paciente, Agendar y Notificar'}
-                    </button>
+                    {renderSelectorAgendamiento(true)}
                   </div>
                 )}
               </div>
@@ -1659,21 +2323,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                   >
                     {loadingCrearMigracion ? 'Registrando...' : '💾 Guardar Paciente en el Sistema'}
                   </button>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Usuario (para iniciar sesión)</label>
-                  <input type="text" value={nuevoUsuario}
-                    onChange={(e) => setNuevoUsuario(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="dr.caputi" autoComplete="off" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                    {medicoEditandoId ? 'Nueva contraseña (vacío = no cambiar)' : 'Contraseña'}
-                  </label>
-                  <input type="text" value={nuevaPassword}
-                    onChange={(e) => setNuevaPassword(e.target.value)}
-                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="Mínimo 8 caracteres" autoComplete="new-password" />
                 </div>
               </form>
             )}
@@ -1824,9 +2473,50 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 {modoCrearHistorico && (
                   <form onSubmit={guardarHistoricoRetrospectivo} className="p-4 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-4">
                     <h5 className="text-xs font-extrabold text-indigo-900 uppercase tracking-wider">
-                      📝 Carga Retrospectiva de Historia Clínica (Paciente Migrado)
+                      {agendaEsPsicologia
+                        ? '🧠 Carga Retrospectiva de Sesión Psicológica (Paciente Migrado)'
+                        : '📝 Carga Retrospectiva de Historia Clínica (Paciente Migrado)'}
                     </h5>
-                    
+
+                    {agendaEsPsicologia ? (
+                    <>
+                    <div className="max-w-xs">
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Fecha de la Sesión Pasada</label>
+                      <input
+                        type="date"
+                        value={fechaHistoricaRetrof}
+                        onChange={(e) => setFechaHistoricaRetrof(e.target.value)}
+                        className="w-full p-2.5 border rounded-xl text-xs bg-white font-semibold"
+                        required
+                      />
+                    </div>
+
+                    {pacienteConsultaLibre?.id && renderDiagnosticoPsico(CLAVE_DIAG_MIGRACION, pacienteConsultaLibre.id, medicoAgendaId)}
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Actividades Realizadas</label>
+                        <textarea
+                          value={motivoHistoricoRetrof}
+                          onChange={(e) => setMotivoHistoricoRetrof(e.target.value)}
+                          placeholder="Ej: Se trabajó técnica de respiración y reestructuración cognitiva..."
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium h-24"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Actividades Próxima Sesión</label>
+                        <textarea
+                          value={proximaSesionRetrof}
+                          onChange={(e) => setProximaSesionRetrof(e.target.value)}
+                          placeholder="Ej: Revisar registro de pensamientos, iniciar exposición gradual..."
+                          className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium h-24"
+                        />
+                      </div>
+                    </div>
+                    </>
+                    ) : (
+                    <>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-[11px] font-bold text-slate-700 mb-1">Fecha de la Atención Pasada</label>
@@ -1931,6 +2621,9 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                       </div>
                     </div>
 
+                    </>
+                    )}
+
                     <div className="flex justify-end pt-2">
                       <button
                         type="submit"
@@ -1974,7 +2667,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                               <span>👨‍⚕️ Dr(a). {historiaLibreSeleccionada.medicos?.nombre || 'Médico Institucional'}</span>
                               <span>{historiaLibreSeleccionada.medicos?.especialidad || 'General'}</span>
                             </div>
-                            <p><strong>Motivo de Consulta:</strong></p>
+                            <p><strong>{esAtencionPsicologica(historiaLibreSeleccionada.medicos) ? 'Actividades realizadas:' : 'Motivo de Consulta:'}</strong></p>
                             <div className="whitespace-pre-wrap font-medium text-slate-800 bg-white p-2.5 rounded-lg border border-slate-200">
                               {historiaLibreSeleccionada.motivo_consulta}
                             </div>
@@ -1983,7 +2676,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                               {historiaLibreSeleccionada.diagnostico}
                             </div>
                             <div>
-                              <strong>Tratamiento / Receta:</strong>
+                              <strong>{esAtencionPsicologica(historiaLibreSeleccionada.medicos) ? 'Actividades próxima sesión:' : 'Tratamiento / Receta:'}</strong>
                               <div className="whitespace-pre-wrap font-medium text-slate-800 pt-1 bg-white p-2.5 rounded-lg border border-slate-200">
                                 {historiaLibreSeleccionada.tratamiento_prescripcion || 'Ninguno'}
                               </div>
@@ -2120,6 +2813,128 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
         {/* TAB 5: GESTIÓN DE MÉDICOS (SOLO ADMIN) */}
         {esAdmin && tabActiva === 'gestion_medicos' && (
           <div className="space-y-6">
+            {/* CATÁLOGO DE ESPECIALIDADES */}
+            <div className="p-6 bg-violet-50/40 rounded-3xl border border-violet-100 space-y-4">
+              <div className="flex justify-between items-center border-b border-violet-100 pb-3">
+                <h3 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">🏷️ Catálogo de Especialidades</h3>
+                <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={espMostrarInactivas}
+                    onChange={(e) => setEspMostrarInactivas(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded"
+                  />
+                  Mostrar inactivas
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_220px_auto] gap-3 items-end">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    {espEditandoId ? 'Editar nombre' : 'Nueva especialidad'}
+                  </label>
+                  <input
+                    type="text"
+                    value={espNombre}
+                    onChange={(e) => setEspNombre(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') guardarEspecialidad(); }}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white"
+                    placeholder="Ej: Psicología Clínica"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Tipo de atención</label>
+                  <select
+                    value={espTipo}
+                    onChange={(e) => setEspTipo(e.target.value as 'medica' | 'psicologica')}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white"
+                  >
+                    <option value="medica">🩺 Médica (con receta)</option>
+                    <option value="psicologica">🧠 Psicológica (sesiones)</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  {espEditandoId && (
+                    <button onClick={limpiarFormularioEspecialidad} className="bg-slate-200 text-xs font-bold py-2.5 px-4 rounded-xl">
+                      Cancelar
+                    </button>
+                  )}
+                  <button
+                    onClick={guardarEspecialidad}
+                    disabled={loadingEsp}
+                    className="bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow-sm transition whitespace-nowrap"
+                  >
+                    {loadingEsp ? 'Guardando...' : espEditandoId ? 'Actualizar' : '+ Agregar'}
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-slate-500">
+                El <strong>tipo de atención</strong> define la pantalla al atender: <em>Médica</em> usa motivo, diagnóstico y receta;
+                <em> Psicológica</em> usa actividades realizadas, diagnóstico único y actividades para la próxima sesión.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {especialidades
+                  .filter((e) => espMostrarInactivas || e.activo)
+                  .map((esp) => {
+                    const enUso = listaMedicos.filter((m: any) => m.especialidad_id === esp.id).length;
+                    return (
+                      <div
+                        key={esp.id}
+                        className={`p-3 rounded-2xl border flex justify-between items-center gap-2 ${
+                          esp.activo ? 'bg-white border-slate-200' : 'bg-slate-100 border-slate-200 opacity-70'
+                        } ${espEditandoId === esp.id ? 'ring-2 ring-violet-400' : ''}`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`font-bold text-xs ${esp.activo ? 'text-slate-800' : 'text-slate-500 line-through'}`}>{esp.nombre}</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                              esp.tipo_atencion === 'psicologica' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'
+                            }`}>
+                              {esp.tipo_atencion === 'psicologica' ? '🧠 Psicológica' : '🩺 Médica'}
+                            </span>
+                            {!esp.activo && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">Inactiva</span>}
+                          </div>
+                          <p className="text-[11px] text-slate-500">{enUso} médico(s)</p>
+                        </div>
+                        <div className="flex gap-1.5 shrink-0">
+                          {esp.activo ? (
+                            <>
+                              <button
+                                onClick={() => seleccionarEspecialidadParaEditar(esp)}
+                                disabled={loadingEsp}
+                                className="bg-slate-100 hover:bg-slate-200 text-[11px] font-bold py-1.5 px-3 rounded-xl border"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                onClick={() => cambiarEstadoEspecialidad(esp, false)}
+                                disabled={loadingEsp}
+                                className="bg-rose-50 hover:bg-rose-100 text-rose-600 text-[11px] font-bold py-1.5 px-3 rounded-xl border border-rose-100"
+                              >
+                                Desactivar
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => cambiarEstadoEspecialidad(esp, true)}
+                              disabled={loadingEsp}
+                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[11px] font-bold py-1.5 px-3 rounded-xl border border-emerald-100"
+                            >
+                              Reactivar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                {especialidades.filter((e) => espMostrarInactivas || e.activo).length === 0 && (
+                  <p className="text-xs text-slate-500 italic">No hay especialidades registradas.</p>
+                )}
+              </div>
+            </div>
+
             <div className="p-6 bg-slate-50/70 rounded-3xl border border-slate-200/80 space-y-4">
               <div className="flex justify-between items-center border-b pb-3">
                 <h3 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">
@@ -2139,7 +2954,23 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Especialidad</label>
-                  <input type="text" value={nuevaEspecialidad} onChange={(e) => setNuevaEspecialidad(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="Cardiología" />
+                  <select
+                    value={nuevaEspecialidadId}
+                    onChange={(e) => setNuevaEspecialidadId(e.target.value)}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white"
+                  >
+                    <option value="">— Selecciona una especialidad —</option>
+                    {especialidades
+                      .filter((e) => e.activo || e.id === nuevaEspecialidadId)
+                      .map((e) => (
+                        <option key={e.id} value={e.id}>
+                          {e.nombre}{e.tipo_atencion === 'psicologica' ? ' (atención psicológica)' : ''}{!e.activo ? ' — inactiva' : ''}
+                        </option>
+                      ))}
+                  </select>
+                  {especialidades.filter((e) => e.activo).length === 0 && (
+                    <p className="text-[11px] text-amber-700 mt-1">Primero crea una especialidad en el catálogo de arriba.</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Correo Electrónico</label>
@@ -2148,6 +2979,20 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Teléfono</label>
                   <input type="text" value={nuevoTelefono} onChange={(e) => setNuevoTelefono(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="0991234567" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Usuario (para iniciar sesión)</label>
+                  <input type="text" value={nuevoUsuario}
+                    onChange={(e) => setNuevoUsuario(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="dr.perez" autoComplete="off" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    {medicoEditandoId ? 'Nueva contraseña (vacío = no cambiar)' : 'Contraseña'}
+                  </label>
+                  <input type="password" value={nuevaPassword}
+                    onChange={(e) => setNuevaPassword(e.target.value)}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="Mínimo 8 caracteres" autoComplete="new-password" />
                 </div>
               </div>
 
@@ -2182,7 +3027,12 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                   <div key={med.id} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm flex justify-between items-center">
                     <div>
                       <h5 className="font-bold text-xs text-slate-800">{med.nombre}</h5>
-                      <p className="text-[11px] text-slate-500">{med.especialidad} | ✉️ {med.email}</p>
+                      <p className="text-[11px] text-slate-500">
+                        {med.especialidad || 'Sin especialidad'}
+                        {esAtencionPsicologica(med) && <span className="ml-1 text-violet-600 font-bold">🧠</span>}
+                        {!med.especialidad_id && <span className="ml-1 text-amber-600 font-bold">⚠️ sin asignar del catálogo</span>}
+                        {' '}| ✉️ {med.email}
+                      </p>
                     </div>
                     <button onClick={() => seleccionarParaEditarMedico(med)} className="bg-slate-100 hover:bg-slate-200 text-xs font-bold py-1.5 px-3 rounded-xl border">Editar</button>
                   </div>
