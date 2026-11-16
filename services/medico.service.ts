@@ -6,8 +6,17 @@ export const MedicoService = {
     if (!session) return { userAuth: null, perfilUsuario: null, esAdmin: false, listaMedicos: [] };
 
     const userAuth = session.user;
-    
-    let perfil = null;
+    const { data: perfil } = await supabase
+  .from('medicos')
+  .select('*')
+  .eq('auth_user_id', userAuth.id)
+  .maybeSingle();
+
+if (!perfil) {
+  await supabase.auth.signOut();
+  return { userAuth: null, perfilUsuario: null, esAdmin: false, listaMedicos: [] };
+}
+    /* let perfil = null;
     if (userAuth.email) {
       const { data: perfilPorEmail } = await supabase
         .from('medicos')
@@ -17,7 +26,7 @@ export const MedicoService = {
       
       if (perfilPorEmail) {
         perfil = perfilPorEmail;
-      }
+      } 
     }
 
     if (!perfil) {
@@ -51,7 +60,7 @@ export const MedicoService = {
         especialidad: 'Medicina General',
         rol: 'medico'
       };
-    }
+    }*/
 
     const esAdmin = perfil?.rol === 'admin';
 
@@ -68,10 +77,17 @@ export const MedicoService = {
     };
   },
 
-  async iniciarSesion(email: string, pass: string) {
+  /* async iniciarSesion(email: string, pass: string) {
     const { error } = await supabase.auth.signInWithPassword({ email, password: pass });
     if (error) throw error;
-  },
+  } */
+  
+  async iniciarSesion(usuario: string, pass: string) {
+  const u = usuario.trim().toLowerCase();
+  const email = u.includes('@') ? u : `${u}@agendamiento.internal`;
+  const { error } = await supabase.auth.signInWithPassword({ email, password: pass });
+  if (error) throw new Error('Usuario o contraseña incorrectos');
+},
 
   async cerrarSesion() {
     await supabase.auth.signOut();
@@ -454,4 +470,31 @@ export const MedicoService = {
 
     if (error) throw error;
   },
+
+  async guardarAccesoMedico(datos: {
+  medicoId?: string;
+  nombre?: string;
+  especialidad?: string;
+  email?: string;
+  telefono?: string;
+  tiene_historia_clinica?: boolean;
+  usuario: string;
+  password: string;
+}) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión.');
+
+  const res = await fetch('/api/admin/medicos', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify(datos),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'No se pudo guardar.');
+  return json;
+},
+
 };

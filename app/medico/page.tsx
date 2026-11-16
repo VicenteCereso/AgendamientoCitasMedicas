@@ -47,6 +47,8 @@ export default function PanelMedicoPage() {
   const [mensajeExitoRecuperacion, setMensajeExitoRecuperacion] = useState<string>('');
   const [loadingRecuperacion, setLoadingRecuperacion] = useState<boolean>(false);
 
+const [nuevoUsuario, setNuevoUsuario] = useState<string>('');
+const [nuevaPassword, setNuevaPassword] = useState<string>('');
   // Citas y Disponibilidad
   const [citas, setCitas] = useState<CitaDetalle[]>([]);
   const [disponibilidades, setDisponibilidades] = useState<any[]>([]);
@@ -474,6 +476,8 @@ export default function PanelMedicoPage() {
     setNuevoTelefono(med.telefono || '');
     setNuevoRol(med.rol || 'medico');
     setTieneHistoriaClinicaFlag(med.tiene_historia_clinica ?? true);
+    setNuevoUsuario(med.usuario || '');
+    setNuevaPassword('');
   }
 
   function limpiarFormularioMedico() {
@@ -484,43 +488,64 @@ export default function PanelMedicoPage() {
     setNuevoTelefono('');
     setNuevoRol('medico');
     setTieneHistoriaClinicaFlag(true);
+    setNuevoUsuario('');
+    setNuevaPassword('');
   }
 
   async function guardarMedicoAdmin() {
-    if (!nuevoNombre || !nuevoEmail) {
-      alert('Completa nombre y correo.');
-      return;
-    }
-    setLoadingMedico(true);
-    try {
-      if (medicoEditandoId) {
-        await MedicoService.actualizarMedico(medicoEditandoId, {
-          nombre: nuevoNombre,
-          especialidad: nuevaEspecialidad,
-          email: nuevoEmail,
-          telefono: nuevoTelefono,
-          rol: nuevoRol,
-          tiene_historia_clinica: tieneHistoriaClinicaFlag
-        });
-        alert('¡Médico actualizado!');
-      } else {
-        await MedicoService.crearMedico({
-          nombre: nuevoNombre,
-          especialidad: nuevaEspecialidad,
-          email: nuevoEmail,
-          telefono: nuevoTelefono,
-          rol: nuevoRol,
-          tiene_historia_clinica: tieneHistoriaClinicaFlag
-        });
-        alert('¡Médico registrado!');
-      }
-      limpiarFormularioMedico();
-      await inicializar();
-    } catch (err: any) {
-      alert('Error: ' + err.message);
-    }
-    setLoadingMedico(false);
+  if (!nuevoNombre.trim()) {
+    alert('Completa el nombre.');
+    return;
   }
+  const usuario = nuevoUsuario.trim().toLowerCase();
+
+  if (!medicoEditandoId && (!usuario || !nuevaPassword)) {
+    alert('Para registrar un médico nuevo escribe su usuario y contraseña.');
+    return;
+  }
+  if (nuevaPassword && !usuario) {
+    alert('Escribe el usuario.');
+    return;
+  }
+
+  setLoadingMedico(true);
+  try {
+    if (medicoEditandoId) {
+      await MedicoService.actualizarMedico(medicoEditandoId, {
+        nombre: nuevoNombre,
+        especialidad: nuevaEspecialidad,
+        email: nuevoEmail.trim() || null,
+        telefono: nuevoTelefono,
+        rol: nuevoRol,
+        tiene_historia_clinica: tieneHistoriaClinicaFlag
+      });
+      if (nuevaPassword) {
+        await MedicoService.guardarAccesoMedico({
+          medicoId: medicoEditandoId,
+          usuario,
+          password: nuevaPassword
+        });
+      }
+      alert('¡Médico actualizado!');
+    } else {
+      await MedicoService.guardarAccesoMedico({
+        nombre: nuevoNombre,
+        especialidad: nuevaEspecialidad,
+        email: nuevoEmail,
+        telefono: nuevoTelefono,
+        tiene_historia_clinica: tieneHistoriaClinicaFlag,
+        usuario,
+        password: nuevaPassword
+      });
+      alert(`¡Médico registrado! Usuario: ${usuario}`);
+    }
+    limpiarFormularioMedico();
+    await inicializar();
+  } catch (err: any) {
+    alert('Error: ' + err.message);
+  }
+  setLoadingMedico(false);
+}
 
   async function toggleHistorialInline(citaId: string, pacienteId: string) {
     if (historialVisibleCitaId === citaId) {
@@ -911,10 +936,11 @@ export default function PanelMedicoPage() {
               <div className="space-y-1.5">
                 <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider">Correo Electrónico</label>
                 <input 
-                  type="email" 
+                  type="text" 
                   value={emailLogin} 
                   onChange={(e) => setEmailLogin(e.target.value)} 
                   placeholder="doctor@clinica.com" 
+                  autoComplete="username"
                   className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-semibold text-slate-800 focus:bg-white focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 outline-none transition" 
                   required 
                 />
@@ -1633,6 +1659,21 @@ export default function PanelMedicoPage() {
                   >
                     {loadingCrearMigracion ? 'Registrando...' : '💾 Guardar Paciente en el Sistema'}
                   </button>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Usuario (para iniciar sesión)</label>
+                  <input type="text" value={nuevoUsuario}
+                    onChange={(e) => setNuevoUsuario(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="dr.caputi" autoComplete="off" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    {medicoEditandoId ? 'Nueva contraseña (vacío = no cambiar)' : 'Contraseña'}
+                  </label>
+                  <input type="text" value={nuevaPassword}
+                    onChange={(e) => setNuevaPassword(e.target.value)}
+                    className="w-full p-2.5 border rounded-xl text-xs bg-white" placeholder="Mínimo 8 caracteres" autoComplete="new-password" />
                 </div>
               </form>
             )}
