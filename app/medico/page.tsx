@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { MedicoService, type Especialidad, type EstadoFechaRecurrente } from '@/services/medico.service';
 import { EmailService } from '@/services/email.service';
+import ReporteCorreos from './ReporteCorreos';
 
 interface CitaDetalle {
   id: string;
@@ -53,7 +54,7 @@ function esAtencionPsicologica(medico?: { especialidad?: string | null; especial
 }
 
 export default function PanelMedicoPage() {
-  const [tabActiva, setTabActiva] = useState<'citas' | 'agendar_asistente' | 'consultar_expediente' | 'horarios' | 'gestion_medicos'>('citas');
+  const [tabActiva, setTabActiva] = useState<'citas' | 'agendar_asistente' | 'consultar_expediente' | 'horarios' | 'gestion_medicos' | 'correos'>('citas');
 
   // Autenticación y Perfil
   const [userAuth, setUserAuth] = useState<any>(null);
@@ -203,7 +204,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
   // Receta para Imprimir
   const [recetaParaImprimir, setRecetaParaImprimir] = useState<any | null>(null);
-  const [enviandoCorreoReceta, setEnviandoCorreoReceta] = useState<boolean>(false);
 
   useEffect(() => {
     const hoyDate = new Date();
@@ -1194,33 +1194,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setGuardandoHistoria(false);
   }
 
-  // Enviar receta por correo desde el modal
-  async function enviarRecetaPorCorreoModal() {
-    if (!recetaParaImprimir || !recetaParaImprimir.paciente?.email) {
-      alert('El paciente no tiene un correo electrónico registrado para enviar la receta.');
-      return;
-    }
-
-    setEnviandoCorreoReceta(true);
-    try {
-      await EmailService.enviarRecetaMedica({
-        emailDestino: recetaParaImprimir.paciente.email,
-        nombrePaciente: recetaParaImprimir.paciente.nombre,
-        nombreMedico: recetaParaImprimir.medico?.nombre || 'Médico Institucional',
-        especialidadMedico: recetaParaImprimir.medico?.especialidad || 'Medicina General',
-        diagnostico: recetaParaImprimir.diagnostico,
-        medicamentos: recetaParaImprimir.medicamentos
-      });
-
-      alert(`¡Receta enviada exitosamente al correo: ${recetaParaImprimir.paciente.email}!`);
-      setRecetaParaImprimir(null);
-    } catch (err: any) {
-      alert('Error al enviar el correo: ' + err.message);
-    } finally {
-      setEnviandoCorreoReceta(false);
-    }
-  }
-
   function iniciarReagendamiento(cita: CitaDetalle) {
     setMenuAbiertoId(null);
     setCitaEditando(cita);
@@ -1445,16 +1418,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
         tipo_consulta: tipoConsultaManual
       });
 
-      if (pac.email) {
-        await EmailService.enviarConfirmacionCitasRecurrentes({
-          emailDestino: pac.email,
-          nombrePaciente: pac.nombre || '',
-          nombreMedico: perfilUsuario?.nombre || 'Médico Tratante',
-          tipoConsulta: tipoConsultaManual,
-          citas: citas.map((c: any) => ({ fechaHora: c.fecha_hora, enlaceVideollamada: c.enlace_videollamada }))
-        });
-      }
-
+      // Las citas recurrentes no se notifican por correo
       alert(`¡Se agendaron ${citas.length} citas recurrentes!`);
       limpiarAgendamientoManual();
       cargarAgenda(medicoAgendaId);
@@ -1480,8 +1444,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
         return;
       }
       const pacId = pac.id;
-      const emailPacObj = pac.email;
-      const nombrePacObj = pac.nombre || '';
 
       const fechaHoraISO = `${fechaManual}T${horaManualSeleccionada}:00`;
       let enlaceJitsi = null;
@@ -1498,19 +1460,14 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
         enlace_videollamada: enlaceJitsi || undefined
       });
 
-      // DISPARAR CORREO DE CONFIRMACIÓN AUTOMÁTICO
-      if (emailPacObj) {
-        await EmailService.enviarConfirmacionCita({
-          emailDestino: emailPacObj,
-          nombrePaciente: nombrePacObj,
-          nombreMedico: perfilUsuario?.nombre || 'Médico Tratante',
-          fechaHora: fechaHoraISO,
-          tipoConsulta: tipoConsultaManual,
-          enlaceVideollamada: enlaceJitsi || undefined
-        });
-      }
+      // Correo de confirmación (el servidor valida que el paciente tenga correo registrado)
+      const resultadoCorreo = await EmailService.enviarConfirmacionCita({
+        medicoId: targetId,
+        pacienteId: pacId,
+        fechaHora: fechaHoraISO
+      });
 
-      alert('¡Cita agendada y notificación por correo enviada con éxito!');
+      alert('¡Cita agendada con éxito!\n' + EmailService.describirResultado(resultadoCorreo));
       limpiarAgendamientoManual();
       cargarAgenda(targetId);
       setTabActiva('citas');
@@ -1809,7 +1766,20 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
               👥 Gestionar Médicos
             </button>
           )}
+          {esAdmin && (
+            <button
+              onClick={() => setTabActiva('correos')}
+              className={`py-3 px-5 font-bold text-xs border-b-2 transition flex items-center gap-2 ${
+                tabActiva === 'correos' ? 'border-blue-600 text-blue-600 bg-blue-50/40 rounded-t-xl' : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              ✉️ Control de Correos
+            </button>
+          )}
         </div>
+
+        {/* TAB: CONTROL DE CORREOS (solo admin) */}
+        {esAdmin && tabActiva === 'correos' && <ReporteCorreos />}
 
         {/* TAB 1: CITAS ACTIVAS DEL DÍA */}
         {tabActiva === 'citas' && (
@@ -3126,7 +3096,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 </div>
               </div>
 
-              {/* OPCIONES DEL DOCTOR: IMPRIMIR O ENVIAR POR CORREO */}
+              {/* OPCIONES DEL DOCTOR: IMPRIMIR */}
               <div className="flex flex-wrap gap-2 justify-between items-center pt-2 border-t">
                 <button
                   onClick={() => setRecetaParaImprimir(null)}
@@ -3136,14 +3106,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 </button>
 
                 <div className="flex gap-2">
-                  <button
-                    onClick={enviarRecetaPorCorreoModal}
-                    disabled={enviandoCorreoReceta || !recetaParaImprimir.paciente?.email}
-                    className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow-sm transition flex items-center gap-1.5"
-                  >
-                    {enviandoCorreoReceta ? 'Enviando...' : '✉️ Enviar Receta por Correo'}
-                  </button>
-
                   <button
                     onClick={() => window.print()}
                     className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold py-2.5 px-5 rounded-xl shadow-sm transition flex items-center gap-1.5"

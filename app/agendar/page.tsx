@@ -303,20 +303,13 @@ function AgendarContenido() {
       return;
     }
 
-    // Disparar correo si ingresó email
-    if (emailPaciente.trim()) {
-      try {
-        await EmailService.enviarConfirmacionCita({
-          emailDestino: emailPaciente.trim(),
-          nombrePaciente: nombrePaciente,
-          nombreMedico: medicoSeleccionadoObj.nombre,
-          fechaHora: fechaHoraISO,
-          tipoConsulta: tipoConsulta,
-          enlaceVideollamada: enlaceJitsi || undefined,
-        });
-      } catch (errEmail) {
-        console.error('No se pudo enviar el correo:', errEmail);
-      }
+    // Correo de confirmación: el servidor lo envía solo si el paciente tiene correo registrado
+    if (pacienteId) {
+      await EmailService.enviarConfirmacionCita({
+        medicoId: medicoSeleccionadoObj.id,
+        pacienteId,
+        fechaHora: fechaHoraISO,
+      });
     }
 
     setLoading(false);

@@ -1,70 +1,52 @@
 // Versión para el NAVEGADOR. No envía correos por sí misma: llama a /api/email,
-// donde el servidor usa la clave de Resend. Las funciones y parámetros son los
-// mismos de antes, así que las páginas no necesitan cambiar su import.
+// donde el servidor arma el correo con los datos de la base y lo envía por Brevo.
 import { supabase } from '@/lib/supabaseClient';
 
-async function llamarApiEmail(payload: Record<string, unknown>) {
-  // Si hay un médico con sesión iniciada se envía su token; los pacientes (público) no tienen sesión.
-  const { data: { session } } = await supabase.auth.getSession();
-
-  const res = await fetch('/api/email', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || 'No se pudo enviar el correo.');
-}
+export type ResultadoCorreo = {
+  enviado: boolean;
+  motivo?: 'sin_correo' | 'ya_enviado' | 'limite' | 'no_configurado' | 'error';
+};
 
 export class EmailService {
-  // Devuelve true si se envió y false si no. NO lanza error: la cita ya quedó guardada
-  // y un fallo del correo no debe interrumpir el flujo.
+  // Notifica una cita (presencial o telemedicina con su enlace) al correo registrado del paciente.
+  // NO lanza error: la cita ya quedó guardada y un fallo del correo no debe interrumpir el flujo.
   static async enviarConfirmacionCita(params: {
-    emailDestino: string;
-    nombrePaciente: string;
-    nombreMedico: string;
+    medicoId: string;
+    pacienteId: string;
     fechaHora: string;
-    tipoConsulta: string;
-    enlaceVideollamada?: string;
-  }): Promise<boolean> {
+  }): Promise<ResultadoCorreo> {
     try {
-      await llamarApiEmail({ tipo: 'confirmacion_cita', ...params });
-      return true;
+      // Si hay un médico con sesión se envía su token; los pacientes (agenda pública) no tienen sesión.
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch('/api/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ tipo: 'confirmacion_cita', ...params }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error('Correo de confirmación no enviado:', json.error || res.status);
+        return { enviado: false, motivo: 'error' };
+      }
+      return json as ResultadoCorreo;
     } catch (err) {
       console.error('Correo de confirmación no enviado:', err);
-      return false;
+      return { enviado: false, motivo: 'error' };
     }
   }
 
-  static async enviarConfirmacionCitasRecurrentes(params: {
-    emailDestino: string;
-    nombrePaciente: string;
-    nombreMedico: string;
-    tipoConsulta: string;
-    citas: Array<{ fechaHora: string; enlaceVideollamada?: string | null }>;
-  }): Promise<boolean> {
-    try {
-      await llamarApiEmail({ tipo: 'confirmacion_serie', ...params });
-      return true;
-    } catch (err) {
-      console.error('Correo de citas recurrentes no enviado:', err);
-      return false;
+  // Texto para mostrar al usuario según el resultado
+  static describirResultado(r: ResultadoCorreo): string {
+    if (r.enviado) return 'Se envió la notificación por correo al paciente.';
+    switch (r.motivo) {
+      case 'sin_correo': return 'El paciente no tiene correo registrado: no se envió notificación.';
+      case 'ya_enviado': return 'La notificación de esta cita ya había sido enviada.';
+      case 'limite': return 'Se alcanzó el límite de correos de Brevo: no se envió la notificación.';
+      case 'no_configurado': return 'El envío de correos no está configurado: no se envió la notificación.';
+      default: return 'No se pudo enviar la notificación por correo.';
     }
-  }
-
-  // La receta SÍ lanza error si falla: el médico pidió enviarla y debe saber si no salió.
-  static async enviarRecetaMedica(params: {
-    emailDestino: string;
-    nombrePaciente: string;
-    nombreMedico: string;
-    especialidadMedico: string;
-    diagnostico: string;
-    medicamentos: Array<{ cantidad: string; medicamento: string; posologia: string }>;
-  }): Promise<void> {
-    await llamarApiEmail({ tipo: 'receta', ...params });
   }
 }
