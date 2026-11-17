@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useHoyEcuador } from '@/lib/useHoyEcuador';
+import { enmascararCedula } from '@/lib/agenda';
 
 interface Medico {
   id: string;
@@ -455,7 +456,7 @@ function AgendarContenido() {
                     <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between gap-2">
                       <div className="text-xs">
                         <p className="font-bold text-emerald-800">✅ Paciente encontrado: {pacienteVerificado.nombre}</p>
-                        <p className="text-emerald-700">🪪 Cédula {pacienteVerificado.cedula}</p>
+                        <p className="text-emerald-700">🪪 Cédula {enmascararCedula(pacienteVerificado.cedula)}</p>
                       </div>
                       <button type="button" onClick={limpiarPaciente} className="text-xs text-rose-600 font-bold hover:underline whitespace-nowrap">
                         Cambiar

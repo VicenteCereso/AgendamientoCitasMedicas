@@ -61,6 +61,20 @@ export function esPasado(fecha: string, hora: string, ahora = ahoraEcuador()) {
   return aMinutos(hora) <= ahora.minutos;
 }
 
+// Enlace de videollamada con nombre de sala aleatorio (UUID): no se puede adivinar
+// a partir del médico, la fecha o la hora. Cada cita tiene su propia sala.
+export function generarEnlaceVideollamada() {
+  return `https://meet.jit.si/AgendaMedica-${crypto.randomUUID()}`;
+}
+
+// "0912345678" -> "091****678": oculta los 4 caracteres del medio
+export function enmascararCedula(cedula: string) {
+  const c = cedula.trim();
+  if (c.length <= 4) return '*'.repeat(c.length);
+  const inicio = Math.floor((c.length - 4) / 2);
+  return c.slice(0, inicio) + '****' + c.slice(inicio + 4);
+}
+
 // "2026-11-17T15:00:00" -> { fecha: "2026-11-17", hora: "15:00" }
 export function partesFechaHora(fechaHora: string) {
   return { fecha: fechaHora.slice(0, 10), hora: fechaHora.slice(11, 16) };
