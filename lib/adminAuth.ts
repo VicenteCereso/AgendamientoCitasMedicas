@@ -1,5 +1,6 @@
 // SOLO SE USA EN EL SERVIDOR (rutas dentro de app/api).
 import { NextRequest, NextResponse } from 'next/server';
+import { unstable_rethrow } from 'next/navigation';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export function responderError(mensaje: string, status: number) {
@@ -61,4 +62,19 @@ export async function obtenerMedicoSesion(req: NextRequest) {
     .maybeSingle();
 
   return perfil || null;
+}
+
+// Envuelve un handler de ruta para que cualquier error inesperado (p. ej. variables de
+// entorno faltantes) responda JSON con el motivo, en vez de una página 500 sin detalle.
+export function conManejoErrores(handler: (req: NextRequest) => Promise<Response>) {
+  return async (req: NextRequest): Promise<Response> => {
+    try {
+      return await handler(req);
+    } catch (err) {
+      unstable_rethrow(err); // deja pasar las señales internas de Next (prerender, redirect...)
+      const mensaje = err instanceof Error ? err.message : String(err);
+      console.error(`[api] ${req.method} ${req.nextUrl.pathname}:`, mensaje);
+      return responderError('Error del servidor: ' + mensaje, 500);
+    }
+  };
 }
