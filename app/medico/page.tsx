@@ -741,6 +741,14 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const medicoAgendaId: string = (esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id) || '';
   const agendaEsPsicologia = medicoEsPsicologia(medicoAgendaId);
 
+  useEffect(() => {
+  setHistorialConsultaLibre([]);
+  setPacienteConsultaLibre(null);
+  setHistoriaLibreSeleccionada(null);
+  setHistoriasPorCita({});
+  setHistorialVisibleCitaId(null);
+}, [medicoAgendaId]);
+
   // Al abrir el formulario de migración de un psicólogo, cargar el diagnóstico único del paciente
   useEffect(() => {
     if (modoCrearHistorico && agendaEsPsicologia && pacienteConsultaLibre?.id && medicoAgendaId) {
