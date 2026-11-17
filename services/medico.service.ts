@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
-import { calcularTurnosFecha, esPasado, normalizarFecha, turnosLibres } from '@/lib/agenda';
+import { calcularTurnosFecha, esPasado, generarEnlaceVideollamada, normalizarFecha, turnosLibres } from '@/lib/agenda';
 
 // Médico con los datos de su especialidad del catálogo (tipo_atencion decide la pantalla de atención)
 const SELECT_MEDICO = '*, especialidades(id, nombre, tipo_atencion, activo)';
@@ -308,9 +308,7 @@ if (!perfil) {
       paciente_id: params.paciente_id,
       fecha_hora: `${fecha}T${params.hora}:00`,
       tipo_consulta: params.tipo_consulta,
-      enlace_videollamada: params.tipo_consulta === 'telemedicina'
-        ? `https://meet.jit.si/ConsultaMedica-${params.medico_id.substring(0, 5)}-${fecha}-${params.hora.replace(':', '')}`
-        : null,
+      enlace_videollamada: params.tipo_consulta === 'telemedicina' ? generarEnlaceVideollamada() : null,
       estado: 'confirmada',
       serie_id: serieId,
     }));
@@ -443,11 +441,7 @@ if (!perfil) {
 
   async reagendarCita(citaId: string, medicoId: string, tipoConsulta: string, nuevaFecha: string, nuevaHora: string) {
     const fechaHoraISO = `${nuevaFecha}T${nuevaHora}:00`;
-    let enlaceJitsi = null;
-    if (tipoConsulta === 'telemedicina') {
-      const salaUnica = `ConsultaMedica-${medicoId.substring(0, 5)}-${nuevaFecha}-${nuevaHora.replace(':', '')}`;
-      enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
-    }
+    const enlaceJitsi = tipoConsulta === 'telemedicina' ? generarEnlaceVideollamada() : null;
 
     const { error } = await supabase
       .from('citas')

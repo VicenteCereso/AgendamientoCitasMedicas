@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { conManejoErrores, leerBody, responderError } from '@/lib/adminAuth';
-import { esPasado } from '@/lib/agenda';
+import { esPasado, generarEnlaceVideollamada } from '@/lib/agenda';
 import { CEDULA, FECHA, HORA, obtenerMedicoPublico, obtenerTurnosLibres } from '@/lib/agendaServidor';
 import { notificarCita, type ResultadoNotificacion } from '@/lib/notificaciones';
 
@@ -82,9 +82,7 @@ async function manejarPOST(req: NextRequest) {
   if ('error' in paciente) return paciente.error;
 
   const fechaHora = `${fecha}T${hora}:00`;
-  const enlace = tipoConsulta === 'telemedicina'
-    ? `https://meet.jit.si/ConsultaMedica-${medico.id.substring(0, 5)}-${fecha}-${hora.replace(':', '')}`
-    : null;
+  const enlace = tipoConsulta === 'telemedicina' ? generarEnlaceVideollamada() : null;
 
   const { data: cita, error: errCita } = await supabaseAdmin
     .from('citas')

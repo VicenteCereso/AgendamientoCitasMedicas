@@ -5,7 +5,7 @@ import { MedicoService, type Especialidad, type EstadoFechaRecurrente } from '@/
 import { EmailService } from '@/services/email.service';
 import ReporteCorreos from './ReporteCorreos';
 import CalendarioHorarios from './CalendarioHorarios';
-import { esPasado } from '@/lib/agenda';
+import { esPasado, generarEnlaceVideollamada } from '@/lib/agenda';
 import { useHoyEcuador } from '@/lib/useHoyEcuador';
 
 interface CitaDetalle {
@@ -1461,11 +1461,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
       const pacId = pac.id;
 
       const fechaHoraISO = `${fechaManual}T${horaManualSeleccionada}:00`;
-      let enlaceJitsi = null;
-      if (tipoConsultaManual === 'telemedicina') {
-        const salaUnica = `ConsultaMedica-${targetId.substring(0, 5)}-${fechaManual}-${horaManualSeleccionada.replace(':', '')}`;
-        enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
-      }
+      const enlaceJitsi = tipoConsultaManual === 'telemedicina' ? generarEnlaceVideollamada() : null;
 
       await MedicoService.agendarCitaManual({
         medico_id: targetId,
