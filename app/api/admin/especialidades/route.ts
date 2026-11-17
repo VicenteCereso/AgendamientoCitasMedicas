@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { leerBody, obtenerAdmin, responderError } from '@/lib/adminAuth';
+import { leerBody, obtenerAdmin, responderError, conManejoErrores } from '@/lib/adminAuth';
 import { NextRequest, NextResponse } from 'next/server';
 
 // Mantenedor de especialidades (solo administradores).
@@ -13,7 +13,7 @@ function mensajeDb(err: { code?: string; message: string }) {
 }
 
 // ---- Crear especialidad ----
-export async function POST(req: NextRequest) {
+async function manejarPOST(req: NextRequest) {
   const admin = await obtenerAdmin(req);
   if (!admin) return responderError('No autorizado.', 403);
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 }
 
 // ---- Editar, desactivar (eliminación lógica) o reactivar ----
-export async function PATCH(req: NextRequest) {
+async function manejarPATCH(req: NextRequest) {
   const admin = await obtenerAdmin(req);
   if (!admin) return responderError('No autorizado.', 403);
 
@@ -84,3 +84,6 @@ export async function PATCH(req: NextRequest) {
 
   return NextResponse.json({ ok: true, especialidad: data });
 }
+
+export const POST = conManejoErrores(manejarPOST);
+export const PATCH = conManejoErrores(manejarPATCH);

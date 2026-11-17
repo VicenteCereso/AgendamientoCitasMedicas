@@ -5,7 +5,7 @@
 // correos arbitrarios. Cada cita se notifica una sola vez.
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { obtenerMedicoSesion, leerBody, responderError } from '@/lib/adminAuth';
+import { obtenerMedicoSesion, leerBody, responderError, conManejoErrores } from '@/lib/adminAuth';
 import { enviarCorreo, esc } from '@/lib/correo';
 
 const EMAIL_VALIDO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -65,7 +65,7 @@ function correoConfirmacion(cita: CitaConDatos, fechaHora: string) {
 }
 
 // Respuesta: { enviado: boolean, motivo?: 'sin_correo' | 'ya_enviado' | 'limite' | 'no_configurado' | 'error' }
-export async function POST(req: NextRequest) {
+async function manejarPOST(req: NextRequest) {
   const body = await leerBody(req);
   if (!body || body.tipo !== 'confirmacion_cita') return responderError('Solicitud inválida.', 400);
 
@@ -122,3 +122,5 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json(resultado);
 }
+
+export const POST = conManejoErrores(manejarPOST);
