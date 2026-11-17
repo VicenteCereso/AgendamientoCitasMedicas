@@ -45,3 +45,20 @@ export async function obtenerAdmin(req: NextRequest) {
   }
   return perfil;
 }
+
+// Cualquier médico (o admin) con sesión válida y enlazado en la tabla medicos.
+export async function obtenerMedicoSesion(req: NextRequest) {
+  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!token) return null;
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !data.user) return null;
+
+  const { data: perfil } = await supabaseAdmin
+    .from('medicos')
+    .select('id, nombre, rol')
+    .eq('auth_user_id', data.user.id)
+    .maybeSingle();
+
+  return perfil || null;
+}

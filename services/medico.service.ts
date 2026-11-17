@@ -417,12 +417,14 @@ if (!perfil) {
     });
   },
 
- async obtenerHistorialPaciente(pacienteId: string) {
+ async obtenerHistorialPaciente(pacienteId: string, medicoId: string) {
+  if (!pacienteId || !medicoId) return [];
   const { data, error } = await supabase
     .from('historias_clinicas')
     .select('*, medicos(nombre, especialidad, especialidades(tipo_atencion))')
     .eq('paciente_id', pacienteId)
-    .order('fecha_registro', { ascending: true }); // <--- Cambiado a true para ir de la más antigua a la más actual
+    .eq('medico_id', medicoId)
+    .order('fecha_registro', { ascending: true });
 
   if (error) throw error;
   return data || [];

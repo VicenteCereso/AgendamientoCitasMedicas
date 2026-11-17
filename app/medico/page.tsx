@@ -418,7 +418,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setEditandoPaciente(false);
 
     try {
-      const historial = await MedicoService.obtenerHistorialPaciente(pac.id);
+      const historial = await MedicoService.obtenerHistorialPaciente(pac.id, medicoAgendaId);
       setHistorialConsultaLibre(historial);
       if (historial.length > 0) {
         setHistoriaLibreSeleccionada(historial[0]);
@@ -504,7 +504,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
       alert('¡Sesión histórica registrada con éxito en el expediente del paciente!');
 
-      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id);
+      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id, medicoAgendaId);
       setHistorialConsultaLibre(historialActualizado);
       if (historialActualizado.length > 0) {
         setHistoriaLibreSeleccionada(historialActualizado[0]);
@@ -549,7 +549,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
       alert('¡Atención histórica registrada con éxito en el expediente del paciente!');
       
-      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id);
+      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id, medicoAgendaId);
       setHistorialConsultaLibre(historialActualizado);
       if (historialActualizado.length > 0) {
         setHistoriaLibreSeleccionada(historialActualizado[0]);
@@ -700,7 +700,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
     setLoadingHistorialInline(true);
     try {
-      const historial = await MedicoService.obtenerHistorialPaciente(pacienteId);
+      const historial = await MedicoService.obtenerHistorialPaciente(pacienteId, medicoAgendaId);
       setHistoriasPorCita(prev => ({ ...prev, [citaId]: historial }));
       if (historial.length > 0) {
         setHistoriaSeleccionadaDetalle(prev => ({ ...prev, [citaId]: historial[0] }));
@@ -1001,6 +1001,16 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="text-[11px] font-bold text-slate-600 uppercase">{seleccionadas} de {recFechas.length} fechas seleccionadas</span>
+                  <span className="flex gap-3 text-[11px] font-bold">
+                    <button type="button" className="text-violet-700 hover:underline"
+                      onClick={() => setRecFechas((prev) => prev.map((x) => ({ ...x, seleccionada: x.estado !== 'ocupada' && x.estado !== 'pasada' })))}>
+                      Marcar todas
+                    </button>
+                    <button type="button" className="text-slate-500 hover:underline"
+                      onClick={() => setRecFechas((prev) => prev.map((x) => ({ ...x, seleccionada: false })))}>
+                      Quitar todas
+                    </button>
+                  </span>
                 </div>
                 <div className="max-h-56 overflow-y-auto border rounded-xl divide-y divide-slate-100 bg-white">
                   {recFechas.map((rf, i) => {
@@ -1029,7 +1039,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                 </div>
                 {recFechas.some((x) => x.estado === 'fuera_horario') && (
                   <p className="text-[11px] text-amber-700">
-                    &quot;Fuera de horario&quot;: esa fecha no tiene un turno configurado a esa hora en Configurar Horarios. Puedes marcarla igualmente si lo deseas.
+                    &quot;Fuera de horario&quot;: esa fecha no tiene un turno configurado a esa hora en Configurar Horarios. Se agendará igualmente.
                   </p>
                 )}
 
@@ -1392,7 +1402,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setEvaluandoRec(true);
     try {
       const evaluadas = await MedicoService.evaluarFechasRecurrentes(medicoAgendaId, fechas, recHora);
-      setRecFechas(evaluadas.map((e) => ({ ...e, seleccionada: e.estado === 'disponible' })));
+      setRecFechas(evaluadas.map((e) => ({...e, seleccionada: e.estado !== 'ocupada' && e.estado !== 'pasada'})));
     } catch (err: any) {
       alert('No se pudieron revisar las fechas: ' + err.message);
     }
@@ -1406,11 +1416,11 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       alert('Selecciona al menos una fecha.');
       return;
     }
-    const fueraHorario = recFechas.filter((f) => f.seleccionada && f.estado === 'fuera_horario').length;
+    /* const fueraHorario = recFechas.filter((f) => f.seleccionada && f.estado === 'fuera_horario').length;
     if (fueraHorario > 0 && !confirm(`${fueraHorario} fecha(s) están fuera del horario configurado. ¿Agendarlas de todas formas?`)) {
       return;
     }
-
+ */
     setLoadingManual(true);
     try {
       const pac = await obtenerOCrearPacienteManual();
