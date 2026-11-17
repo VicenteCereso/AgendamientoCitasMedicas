@@ -1,7 +1,7 @@
 // Reporte de correos enviados (solo administrador) para controlar el cupo de Brevo.
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { obtenerAdmin, responderError } from '@/lib/adminAuth';
+import { obtenerAdmin, responderError, conManejoErrores } from '@/lib/adminAuth';
 import { LIMITE_DIARIO, LIMITE_MENSUAL, contarEnviadosDesde, hoyLocal, inicioDiaUTC } from '@/lib/correo';
 
 const FECHA = /^\d{4}-\d{2}-\d{2}$/;
@@ -14,7 +14,7 @@ function sumarDias(fecha: string, dias: number): string {
 }
 
 // GET /api/admin/correos?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
-export async function GET(req: NextRequest) {
+async function manejarGET(req: NextRequest) {
   const admin = await obtenerAdmin(req);
   if (!admin) return responderError('No autorizado.', 403);
 
@@ -57,3 +57,5 @@ export async function GET(req: NextRequest) {
     return responderError('No se pudo generar el reporte: ' + mensaje, 500);
   }
 }
+
+export const GET = conManejoErrores(manejarGET);

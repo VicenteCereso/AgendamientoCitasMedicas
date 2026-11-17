@@ -24,7 +24,7 @@ async function llamarApiAdmin(url: string, method: 'POST' | 'PATCH', datos: unkn
     body: JSON.stringify(datos),
   });
   const json = await res.json().catch(() => null);
-  if (!json) throw new Error(`El servidor respondió con un error inesperado (${res.status}). Revisa la consola de "next dev".`);
+  if (!json) throw new Error(`El servidor respondió con un error inesperado (${res.status}). Revisa los logs del servidor.`);
   if (!res.ok) throw new Error(json.error || 'No se pudo guardar.');
   return json;
 }

@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { leerBody, obtenerAdmin, responderError } from '@/lib/adminAuth';
+import { leerBody, obtenerAdmin, responderError, conManejoErrores } from '@/lib/adminAuth';
 import { NextRequest, NextResponse } from 'next/server';
 
 
@@ -59,7 +59,7 @@ function camposPerfil(body: any) {
 }
 
 // ---- Registrar un médico nuevo con su cuenta de acceso ----
-export async function POST(req: NextRequest) {
+async function manejarPOST(req: NextRequest) {
   const admin = await obtenerAdmin(req);
   if (!admin) return responderError('No autorizado.', 403);
 
@@ -106,7 +106,7 @@ export async function POST(req: NextRequest) {
 }
 
 // ---- Editar un médico existente (datos y, opcionalmente, usuario/contraseña) ----
-export async function PATCH(req: NextRequest) {
+async function manejarPATCH(req: NextRequest) {
   const admin = await obtenerAdmin(req);
   if (!admin) return responderError('No autorizado.', 403);
 
@@ -180,3 +180,6 @@ export async function PATCH(req: NextRequest) {
 
   return NextResponse.json({ ok: true, id: medicoId, usuario: cambiarAcceso ? usuario : undefined });
 }
+
+export const POST = conManejoErrores(manejarPOST);
+export const PATCH = conManejoErrores(manejarPATCH);
