@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
+import { calcularTurnosFecha, esPasado, generarEnlaceVideollamada, normalizarFecha, turnosLibres } from '@/lib/agenda';
 
 // Médico con los datos de su especialidad del catálogo (tipo_atencion decide la pantalla de atención)
 const SELECT_MEDICO = '*, especialidades(id, nombre, tipo_atencion, activo)';
@@ -30,67 +31,6 @@ async function llamarApiAdmin(url: string, method: 'POST' | 'PATCH', datos: unkn
 }
 
 export type EstadoFechaRecurrente = 'disponible' | 'fuera_horario' | 'ocupada' | 'pasada';
-
-// Normaliza YYYY-MM-DD, YYYY/MM/DD o DD/MM/YYYY a YYYY-MM-DD
-function normalizarFecha(fechaStr: string) {
-  let fechaLimpia = fechaStr.trim();
-  if (fechaLimpia.includes('/')) {
-    const p = fechaLimpia.split('/');
-    fechaLimpia = p[0].length === 4
-      ? `${p[0]}-${p[1].padStart(2, '0')}-${p[2].padStart(2, '0')}`
-      : `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}`;
-  }
-  return fechaLimpia;
-}
-
-// Turnos configurados para una fecha (según disponibilidad del médico) y horas ya ocupadas por citas
-function calcularTurnosFecha(todasDisponibilidades: any[], citasTomadas: any[], fechaLimpia: string) {
-  const [anio, mes, dia] = fechaLimpia.split('-').map(Number);
-  const diaSemanaIndex = new Date(anio, mes - 1, dia).getDay();
-
-  // Fecha específica tiene match exacto; si no, se usa la configuración por día de la semana
-  const disponibilidades = todasDisponibilidades.filter((d: any) => {
-    if (d.fecha_especifica) return d.fecha_especifica.split('T')[0].trim() === fechaLimpia;
-    return d.dia_semana === diaSemanaIndex;
-  });
-
-  const ocupadas = new Set<string>(
-    citasTomadas
-      .filter((c: any) => c.fecha_hora && c.estado !== 'cancelada' && c.fecha_hora.split('T')[0].trim() === fechaLimpia)
-      .map((c: any) => {
-        const d = new Date(c.fecha_hora);
-        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      })
-  );
-
-  const turnos: string[] = [];
-  disponibilidades.forEach((disp: any) => {
-    const [hInicio, mInicio] = disp.hora_inicio.split(':').map(Number);
-    const [hFin, mFin] = disp.hora_fin.split(':').map(Number);
-    const duracion = disp.duracion_cita_minutos || 30;
-
-    let inicioAlmuerzo: number | null = null;
-    let finAlmuerzo: number | null = null;
-    if (disp.hora_inicio_almuerzo && disp.hora_fin_almuerzo) {
-      const [ha, ma] = disp.hora_inicio_almuerzo.split(':').map(Number);
-      const [hb, mb] = disp.hora_fin_almuerzo.split(':').map(Number);
-      inicioAlmuerzo = ha * 60 + ma;
-      finAlmuerzo = hb * 60 + mb;
-    }
-
-    let actual = hInicio * 60 + mInicio;
-    const finMin = hFin * 60 + mFin;
-    while (actual + duracion <= finMin) {
-      const caeEnAlmuerzo = inicioAlmuerzo !== null && finAlmuerzo !== null && actual >= inicioAlmuerzo && actual < finAlmuerzo;
-      if (!caeEnAlmuerzo) {
-        turnos.push(`${String(Math.floor(actual / 60)).padStart(2, '0')}:${String(actual % 60).padStart(2, '0')}`);
-      }
-      actual += duracion;
-    }
-  });
-
-  return { turnos, ocupadas };
-}
 
 export const MedicoService = {
   async obtenerSesionYPerfil() {
@@ -368,9 +308,7 @@ if (!perfil) {
       paciente_id: params.paciente_id,
       fecha_hora: `${fecha}T${params.hora}:00`,
       tipo_consulta: params.tipo_consulta,
-      enlace_videollamada: params.tipo_consulta === 'telemedicina'
-        ? `https://meet.jit.si/ConsultaMedica-${params.medico_id.substring(0, 5)}-${fecha}-${params.hora.replace(':', '')}`
-        : null,
+      enlace_videollamada: params.tipo_consulta === 'telemedicina' ? generarEnlaceVideollamada() : null,
       estado: 'confirmada',
       serie_id: serieId,
     }));
@@ -392,8 +330,8 @@ if (!perfil) {
     if (error || !todasDisponibilidades) return [];
 
     const citasTomadas = await MedicoService.obtenerCitas(medicoId);
-    const { turnos, ocupadas } = calcularTurnosFecha(todasDisponibilidades, citasTomadas, fechaLimpia);
-    return turnos.filter((h) => !ocupadas.has(h));
+    // Solo turnos libres y futuros (las citas canceladas liberan su horario)
+    return turnosLibres(todasDisponibilidades, citasTomadas, fechaLimpia);
   },
 
   // Evalúa varias fechas a una misma hora (citas recurrentes) con solo 2 consultas a la BD.
@@ -403,14 +341,10 @@ if (!perfil) {
       supabase.from('disponibilidad_medico').select('*').eq('medico_id', medicoId),
       MedicoService.obtenerCitas(medicoId),
     ]);
-    const ahora = new Date();
-
     return fechas.map((fecha) => {
       const { turnos, ocupadas } = calcularTurnosFecha(todasDisponibilidades || [], citasTomadas, fecha);
-      const [anio, mes, dia] = fecha.split('-').map(Number);
-      const [hh, mm] = hora.split(':').map(Number);
       let estado: EstadoFechaRecurrente = 'disponible';
-      if (new Date(anio, mes - 1, dia, hh, mm) <= ahora) estado = 'pasada';
+      if (esPasado(fecha, hora)) estado = 'pasada';
       else if (ocupadas.has(hora)) estado = 'ocupada';
       else if (!turnos.includes(hora)) estado = 'fuera_horario';
       return { fecha, estado };
@@ -507,11 +441,7 @@ if (!perfil) {
 
   async reagendarCita(citaId: string, medicoId: string, tipoConsulta: string, nuevaFecha: string, nuevaHora: string) {
     const fechaHoraISO = `${nuevaFecha}T${nuevaHora}:00`;
-    let enlaceJitsi = null;
-    if (tipoConsulta === 'telemedicina') {
-      const salaUnica = `ConsultaMedica-${medicoId.substring(0, 5)}-${nuevaFecha}-${nuevaHora.replace(':', '')}`;
-      enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
-    }
+    const enlaceJitsi = tipoConsulta === 'telemedicina' ? generarEnlaceVideollamada() : null;
 
     const { error } = await supabase
       .from('citas')

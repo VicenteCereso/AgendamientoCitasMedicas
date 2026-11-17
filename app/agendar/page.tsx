@@ -4,31 +4,47 @@ import { useState, useEffect, Suspense } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { EmailService } from '@/services/email.service';
+import { useHoyEcuador } from '@/lib/useHoyEcuador';
+import { enmascararCedula } from '@/lib/agenda';
 
 interface Medico {
   id: string;
   nombre: string;
   especialidad: string;
-  direccion?: string;
-  consultorio?: string;
-  rol?: string;
+  direccion?: string | null;
+  consultorio?: string | null;
 }
 
-interface Disponibilidad {
-  id: string;
-  dia_semana: number;
-  hora_inicio: string;
-  hora_fin: string;
-  duracion_cita_minutos: number;
+type ModoPaciente = 'registrado' | 'nuevo';
+type MotivoCorreo = 'sin_correo' | 'ya_enviado' | 'limite' | 'no_configurado' | 'error';
+
+interface Reserva {
+  cita: { fecha: string; hora: string; tipoConsulta: 'presencial' | 'telemedicina'; enlace: string | null };
+  medico: Medico;
+  correo: { enviado: boolean; motivo?: MotivoCorreo };
 }
 
-interface Paciente {
-  id: string;
-  nombre: string;
-  cedula: string;
-  telefono: string;
-  email?: string;
+const DIRECCION_DEFECTO = 'Av. San Jorge y Calle 10ma, Guayaquil';
+const CONSULTORIO_DEFECTO = 'Piso 2, Consultorio 204';
+
+async function llamarApi<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error(json.error || `Error ${res.status}`) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return json as T;
+}
+
+function textoCorreo(correo: Reserva['correo']) {
+  if (correo.enviado) return '✉️ Te enviamos la confirmación a tu correo.';
+  switch (correo.motivo) {
+    case 'sin_correo': return 'No registraste un correo, por eso no se envió confirmación.';
+    case 'ya_enviado': return '';
+    default: return 'No pudimos enviar el correo de confirmación, pero tu cita quedó registrada.';
+  }
 }
 
 function AgendarContenido() {
@@ -45,73 +61,64 @@ function AgendarContenido() {
 
   const [fechaSeleccionada, setFechaSeleccionada] = useState<string>('');
   const [horariosDisponibles, setHorariosDisponibles] = useState<string[]>([]);
+  const [cargandoHorarios, setCargandoHorarios] = useState<boolean>(false);
   const [horaSeleccionada, setHoraSeleccionada] = useState<string>('');
 
   const [tipoConsulta, setTipoConsulta] = useState<'presencial' | 'telemedicina'>('presencial');
-  
-  // ESTADOS DE PACIENTE Y BÚSQUEDA INTUITIVA
-  const [busquedaPaciente, setBusquedaPaciente] = useState<string>('');
-  const [sugerenciasPacientes, setSugerenciasPacientes] = useState<Paciente[]>([]);
-  const [pacienteSeleccionadoId, setPacienteSeleccionadoId] = useState<string | null>(null);
+
+  // PACIENTE: registrado (se identifica solo con su cédula) o nuevo (llena el formulario)
+  const [modoPaciente, setModoPaciente] = useState<ModoPaciente>('registrado');
+  const [cedulaBusqueda, setCedulaBusqueda] = useState<string>('');
+  const [verificando, setVerificando] = useState<boolean>(false);
+  const [pacienteVerificado, setPacienteVerificado] = useState<{ cedula: string; nombre: string } | null>(null);
+  const [cedulaNoEncontrada, setCedulaNoEncontrada] = useState<boolean>(false);
 
   const [nombrePaciente, setNombrePaciente] = useState<string>('');
   const [cedulaPaciente, setCedulaPaciente] = useState<string>('');
   const [telefonoPaciente, setTelefonoPaciente] = useState<string>('');
   const [emailPaciente, setEmailPaciente] = useState<string>('');
-  const [metodoNotificacion, setMetodoNotificacion] = useState<'whatsapp' | 'email' | 'ambos'>('whatsapp');
 
   const [loading, setLoading] = useState<boolean>(false);
-  const [exito, setExito] = useState<boolean>(false);
+  const [reserva, setReserva] = useState<Reserva | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');
 
-  useEffect(() => {
-    cargarMedicosYVerificarSesion();
-  }, [medicoIdParam]);
+  const hoy = useHoyEcuador();
 
-  async function cargarMedicosYVerificarSesion() {
-    const { data: { session } } = await supabase.auth.getSession();
-
+  async function cargarMedicos() {
     const { data } = await supabase
       .from('medicos')
-      .select('id, nombre, especialidad, direccion, consultorio, rol')
+      .select('id, nombre, especialidad, direccion, consultorio')
       .neq('rol', 'admin')
       .order('nombre', { ascending: true });
 
-    if (data && data.length > 0) {
-      setMedicos(data);
-      setMedicosFiltrados(data);
+    if (!data || data.length === 0) return;
+    setMedicos(data);
+    setMedicosFiltrados(data);
 
-      if (session?.user && medicoIdParam) {
-        const encontrado = data.find((m) => m.id === medicoIdParam);
-        if (encontrado) {
-          setMedicoSeleccionadoObj(encontrado);
-          setBusquedaMedico(`${encontrado.nombre} — ${encontrado.especialidad}`);
-          setMedicoFijo(true);
-        } else {
-          seleccionarMedicoInicial(data[0]);
-        }
-      } else {
-        setMedicoFijo(false);
-        seleccionarMedicoInicial(data[0]);
-      }
+    // Enlace directo del médico (/agendar?medicoId=...): queda fijo, sin buscador
+    const delEnlace = medicoIdParam ? data.find((m) => m.id === medicoIdParam) : null;
+    if (delEnlace) {
+      setMedicoSeleccionadoObj(delEnlace);
+      setBusquedaMedico(`${delEnlace.nombre} — ${delEnlace.especialidad}`);
+      setMedicoFijo(true);
+    } else {
+      setMedicoFijo(false);
+      setMedicoSeleccionadoObj(data[0]);
+      setBusquedaMedico(`${data[0].nombre} — ${data[0].especialidad}`);
     }
   }
 
-  function seleccionarMedicoInicial(med: Medico) {
-    setMedicoSeleccionadoObj(med);
-    setBusquedaMedico(`${med.nombre} — ${med.especialidad}`);
-  }
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    cargarMedicos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [medicoIdParam]);
 
   function handleBuscarMedico(texto: string) {
     setBusquedaMedico(texto);
     setMostrarDropdown(true);
-
-    const filtrados = medicos.filter(
-      (m) =>
-        m.nombre.toLowerCase().includes(texto.toLowerCase()) ||
-        m.especialidad.toLowerCase().includes(texto.toLowerCase())
-    );
-    setMedicosFiltrados(filtrados);
+    const t = texto.toLowerCase();
+    setMedicosFiltrados(medicos.filter((m) => m.nombre.toLowerCase().includes(t) || m.especialidad.toLowerCase().includes(t)));
   }
 
   function seleccionarMedico(med: Medico) {
@@ -121,204 +128,123 @@ function AgendarContenido() {
     setHoraSeleccionada('');
   }
 
-  // BÚSQUEDA INTUITIVA DE PACIENTES (POR CÉDULA O NOMBRE)
-  async function handleBuscarPacienteInput(texto: string) {
-    setBusquedaPaciente(texto);
-    if (!texto.trim()) {
-      setSugerenciasPacientes([]);
-      return;
+  // HORARIOS: los calcula el servidor (solo turnos libres y futuros; las citas canceladas liberan su horario)
+  async function cargarHorarios(medicoId: string, fecha: string) {
+    setCargandoHorarios(true);
+    try {
+      const { horarios } = await llamarApi<{ horarios: string[] }>(
+        `/api/agenda/horarios?medicoId=${encodeURIComponent(medicoId)}&fecha=${encodeURIComponent(fecha)}`
+      );
+      setHorariosDisponibles(horarios);
+    } catch {
+      setHorariosDisponibles([]);
     }
-
-    const { data } = await supabase
-      .from('pacientes')
-      .select('id, nombre, cedula, telefono, email')
-      .or(`nombre.ilike.%${texto}%,cedula.ilike.%${texto}%`)
-      .limit(5);
-
-    setSugerenciasPacientes(data || []);
+    setCargandoHorarios(false);
   }
 
-  function seleccionarPacienteExistente(pac: Paciente) {
-    setPacienteSeleccionadoId(pac.id);
-    setNombrePaciente(pac.nombre);
-    setCedulaPaciente(pac.cedula);
-    setTelefonoPaciente(pac.telefono || '');
-    setEmailPaciente(pac.email || '');
-    setBusquedaPaciente(`${pac.nombre} (${pac.cedula})`);
-    setSugerenciasPacientes([]);
+  useEffect(() => {
+    if (medicoSeleccionadoObj?.id && fechaSeleccionada && fechaSeleccionada >= hoy) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      cargarHorarios(medicoSeleccionadoObj.id, fechaSeleccionada);
+    } else {
+      setHorariosDisponibles([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [medicoSeleccionadoObj, fechaSeleccionada]);
+
+  // PACIENTE REGISTRADO: se confirma por cédula; solo se muestra el nombre parcialmente oculto
+  async function verificarCedula() {
+    const cedula = cedulaBusqueda.trim();
+    setErrorMsg('');
+    setPacienteVerificado(null);
+    setCedulaNoEncontrada(false);
+    if (!cedula) return;
+
+    setVerificando(true);
+    try {
+      const r = await llamarApi<{ existe: boolean; nombre?: string }>('/api/agenda/paciente', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cedula }),
+      });
+      if (r.existe) setPacienteVerificado({ cedula, nombre: r.nombre || '' });
+      else setCedulaNoEncontrada(true);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'No se pudo verificar la cédula.');
+    }
+    setVerificando(false);
   }
 
-  function limpiarPacienteSeleccionado() {
-    setPacienteSeleccionadoId(null);
-    setBusquedaPaciente('');
+  function irANuevoPaciente() {
+    setModoPaciente('nuevo');
+    setErrorMsg('');
+    setPacienteVerificado(null);
+    setCedulaNoEncontrada(false);
+    // Si ya escribió su cédula en la búsqueda, se aprovecha
+    if (cedulaBusqueda.trim() && !cedulaPaciente) setCedulaPaciente(cedulaBusqueda.trim());
+  }
+
+  function irARegistrado() {
+    setModoPaciente('registrado');
+    setErrorMsg('');
+    if (cedulaPaciente.trim() && !cedulaBusqueda) setCedulaBusqueda(cedulaPaciente.trim());
+  }
+
+  function limpiarPaciente() {
+    setModoPaciente('registrado');
+    setCedulaBusqueda('');
+    setPacienteVerificado(null);
+    setCedulaNoEncontrada(false);
     setNombrePaciente('');
     setCedulaPaciente('');
     setTelefonoPaciente('');
     setEmailPaciente('');
   }
 
-  useEffect(() => {
-    if (medicoSeleccionadoObj?.id && fechaSeleccionada) {
-      generarHorariosDisponibles();
-    } else {
-      setHorariosDisponibles([]);
-    }
-  }, [medicoSeleccionadoObj, fechaSeleccionada]);
-
-  async function generarHorariosDisponibles() {
-    if (!medicoSeleccionadoObj) return;
-
-    const dateObj = new Date(fechaSeleccionada + 'T00:00:00');
-    const diaSemanaIndex = dateObj.getDay();
-
-    const { data: disponibilidades } = await supabase
-      .from('disponibilidad_medico')
-      .select('*')
-      .eq('medico_id', medicoSeleccionadoObj.id)
-      .eq('dia_semana', diaSemanaIndex);
-
-    if (!disponibilidades || disponibilidades.length === 0) {
-      setHorariosDisponibles([]);
-      return;
-    }
-
-    const { data: citasTomadas } = await supabase
-      .from('citas')
-      .select('fecha_hora')
-      .eq('medico_id', medicoSeleccionadoObj.id)
-      .neq('estado', 'cancelada');
-
-    const horasOcupadas = (citasTomadas || []).map((c: any) => {
-      const d = new Date(c.fecha_hora);
-      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    });
-
-    const listaHoras: string[] = [];
-
-    disponibilidades.forEach((disp: Disponibilidad) => {
-      const [hInicio, mInicio] = disp.hora_inicio.split(':').map(Number);
-      const [hFin, mFin] = disp.hora_fin.split(':').map(Number);
-      const duracion = disp.duracion_cita_minutos;
-
-      let actualMinutos = hInicio * 60 + mInicio;
-      const finMinutos = hFin * 60 + mFin;
-
-      while (actualMinutos + duracion <= finMinutos) {
-        const hh = String(Math.floor(actualMinutos / 60)).padStart(2, '0');
-        const mm = String(actualMinutos % 60).padStart(2, '0');
-        const horaString = `${hh}:${mm}`;
-
-        if (!horasOcupadas.includes(horaString)) {
-          listaHoras.push(horaString);
-        }
-        actualMinutos += duracion;
-      }
-    });
-
-    setHorariosDisponibles(listaHoras);
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!medicoSeleccionadoObj) {
-      alert('Por favor selecciona un profesional médico.');
-      return;
+    setErrorMsg('');
+    if (!medicoSeleccionadoObj) return setErrorMsg('Por favor selecciona un profesional médico.');
+    if (!horaSeleccionada) return setErrorMsg('Por favor selecciona un horario disponible.');
+    if (modoPaciente === 'registrado' && !pacienteVerificado) {
+      return setErrorMsg('Busca tu cédula para confirmar que ya eres paciente, o elige "Soy Nuevo Paciente".');
     }
-    if (!horaSeleccionada) {
-      alert('Por favor selecciona un horario disponible.');
-      return;
-    }
-    if (!nombrePaciente.trim() || !cedulaPaciente.trim()) {
-      alert('Por favor ingresa el nombre y la cédula del paciente.');
-      return;
-    }
+
+    const paciente = modoPaciente === 'registrado'
+      ? { modo: 'registrado', cedula: pacienteVerificado!.cedula }
+      : { modo: 'nuevo', cedula: cedulaPaciente, nombre: nombrePaciente, telefono: telefonoPaciente, email: emailPaciente };
 
     setLoading(true);
-    setErrorMsg('');
-
-    let pacienteId = pacienteSeleccionadoId;
-
-    if (!pacienteId) {
-      // Verificamos si ya existe por cédula antes de insertar
-      const { data: pacienteExistente } = await supabase
-        .from('pacientes')
-        .select('id')
-        .eq('cedula', cedulaPaciente.trim())
-        .maybeSingle();
-
-      if (pacienteExistente) {
-        pacienteId = pacienteExistente.id;
-        // Actualizamos datos por si hubo cambios
-        await supabase
-          .from('pacientes')
-          .update({ nombre: nombrePaciente, telefono: telefonoPaciente, email: emailPaciente })
-          .eq('id', pacienteId);
-      } else {
-        // Creamos nuevo paciente
-        const { data: nuevoPaciente, error: errPac } = await supabase
-          .from('pacientes')
-          .insert([
-            {
-              nombre: nombrePaciente,
-              cedula: cedulaPaciente.trim(),
-              telefono: telefonoPaciente,
-              email: emailPaciente,
-            },
-          ])
-          .select('id')
-          .single();
-
-        if (errPac || !nuevoPaciente) {
-          setErrorMsg('Error al registrar datos del paciente: ' + (errPac?.message || ''));
-          setLoading(false);
-          return;
-        }
-        pacienteId = nuevoPaciente.id;
+    try {
+      const r = await llamarApi<Reserva>('/api/agenda/citas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          medicoId: medicoSeleccionadoObj.id,
+          fecha: fechaSeleccionada,
+          hora: horaSeleccionada,
+          tipoConsulta,
+          paciente,
+        }),
+      });
+      setReserva(r);
+    } catch (err) {
+      const e2 = err as Error & { status?: number };
+      setErrorMsg(e2.message || 'No se pudo agendar la cita.');
+      // El turno se ocupó mientras llenaba el formulario: refrescar horarios
+      if (e2.status === 409 && medicoSeleccionadoObj) {
+        setHoraSeleccionada('');
+        cargarHorarios(medicoSeleccionadoObj.id, fechaSeleccionada);
       }
     }
-
-    const fechaHoraISO = `${fechaSeleccionada}T${horaSeleccionada}:00`;
-    let enlaceJitsi = null;
-
-    if (tipoConsulta === 'telemedicina') {
-      const salaUnica = `ConsultaMedica-${medicoSeleccionadoObj.id.substring(0, 5)}-${fechaSeleccionada}-${horaSeleccionada.replace(':', '')}`;
-      enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
-    }
-
-    // Insertar Cita Confirmada
-    const { error: errCita } = await supabase.from('citas').insert([
-      {
-        medico_id: medicoSeleccionadoObj.id,
-        paciente_id: pacienteId,
-        fecha_hora: fechaHoraISO,
-        tipo_consulta: tipoConsulta,
-        estado: 'confirmada',
-        enlace_videollamada: enlaceJitsi,
-      },
-    ]);
-
-    if (errCita) {
-      setErrorMsg('Error al agendar la cita: ' + errCita.message);
-      setLoading(false);
-      return;
-    }
-
-    // Correo de confirmación: el servidor lo envía solo si el paciente tiene correo registrado
-    if (pacienteId) {
-      await EmailService.enviarConfirmacionCita({
-        medicoId: medicoSeleccionadoObj.id,
-        pacienteId,
-        fechaHora: fechaHoraISO,
-      });
-    }
-
     setLoading(false);
-    setExito(true);
   }
 
-  if (exito) {
-    const salaUnica = `ConsultaMedica-${medicoSeleccionadoObj?.id.substring(0, 5)}-${fechaSeleccionada}-${horaSeleccionada.replace(':', '')}`;
-    const enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
+  if (reserva) {
+    const { cita, medico, correo } = reserva;
+    const [a, m, d] = cita.fecha.split('-').map(Number);
+    const fechaLegible = new Date(a, m - 1, d).toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const mensajeCorreo = textoCorreo(correo);
 
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
@@ -326,29 +252,31 @@ function AgendarContenido() {
           <div className="text-5xl mb-4">🎉</div>
           <h2 className="text-2xl font-bold text-slate-800 mb-2">¡Cita Agendada con Éxito!</h2>
           <p className="text-sm text-slate-600 mb-4">
-            Registrada para el día <strong>{fechaSeleccionada}</strong> a las <strong>{horaSeleccionada} hs</strong> con el Dr(a).{' '}
-            <strong>{medicoSeleccionadoObj?.nombre}</strong> ({medicoSeleccionadoObj?.especialidad}).
-            {emailPaciente && <span className="block mt-1 text-xs text-blue-600">✉️ Se ha enviado la confirmación a tu correo.</span>}
+            Registrada para el <strong className="capitalize">{fechaLegible}</strong> a las <strong>{cita.hora} hs</strong> con el Dr(a).{' '}
+            <strong>{medico.nombre}</strong> ({medico.especialidad}).
+            {mensajeCorreo && (
+              <span className={`block mt-1 text-xs ${correo.enviado ? 'text-blue-600' : 'text-amber-700'}`}>{mensajeCorreo}</span>
+            )}
           </p>
 
-          {tipoConsulta === 'presencial' ? (
+          {cita.tipoConsulta === 'presencial' ? (
             <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200 text-left space-y-2">
               <p className="text-xs font-bold text-slate-700 uppercase tracking-wide border-b pb-1">📍 Detalle del Consultorio:</p>
               <div>
                 <span className="text-[11px] text-slate-400 uppercase font-semibold block">Dirección de Atención:</span>
-                <p className="text-xs text-slate-800 font-bold">{medicoSeleccionadoObj?.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}</p>
+                <p className="text-xs text-slate-800 font-bold">{medico.direccion || DIRECCION_DEFECTO}</p>
               </div>
               <div>
                 <span className="text-[11px] text-slate-400 uppercase font-semibold block">Piso y N° Consultorio:</span>
-                <p className="text-xs text-blue-700 font-extrabold">🏢 {medicoSeleccionadoObj?.consultorio || 'Piso 2, Consultorio 204'}</p>
+                <p className="text-xs text-blue-700 font-extrabold">🏢 {medico.consultorio || CONSULTORIO_DEFECTO}</p>
               </div>
             </div>
-          ) : (
+          ) : cita.enlace && (
             <div className="mb-6 p-4 bg-purple-50 rounded-xl border border-purple-100 text-left">
               <p className="text-xs font-bold text-purple-900 mb-1">💻 Enlace de Telemedicina:</p>
-              <p className="text-xs text-purple-700 break-all mb-3">{enlaceJitsi}</p>
+              <p className="text-xs text-purple-700 break-all mb-3">{cita.enlace}</p>
               <a
-                href={enlaceJitsi}
+                href={cita.enlace}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="block text-center bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition shadow"
@@ -360,9 +288,10 @@ function AgendarContenido() {
 
           <button
             onClick={() => {
-              setExito(false);
+              setReserva(null);
               setHoraSeleccionada('');
-              limpiarPacienteSeleccionado();
+              limpiarPaciente();
+              if (medicoSeleccionadoObj && fechaSeleccionada) cargarHorarios(medicoSeleccionadoObj.id, fechaSeleccionada);
             }}
             className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl transition text-sm shadow"
           >
@@ -392,28 +321,25 @@ function AgendarContenido() {
       <main className="flex-1 py-10 px-6 max-w-2xl mx-auto w-full">
         <div className="bg-white rounded-2xl shadow-md p-8 border border-slate-100">
           <h1 className="text-2xl font-bold text-slate-800 mb-1">🗓️ Reserva tu Cita Médica</h1>
-          <p className="text-xs text-slate-500 mb-6">Busca al profesional y selecciona el horario de tu preferencia.</p>
-
-          {errorMsg && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">{errorMsg}</div>}
+          <p className="text-xs text-slate-500 mb-6">
+            {medicoFijo ? 'Selecciona el horario de tu preferencia.' : 'Busca al profesional y selecciona el horario de tu preferencia.'}
+          </p>
 
           <form onSubmit={handleSubmit} className="space-y-6">
-            
-            {/* BUSCADOR DE MÉDICOS */}
+
+            {/* MÉDICO */}
             <div className="relative">
               <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
-                1. Selecciona o busca al Médico / Especialidad:
+                {medicoFijo ? '1. Profesional:' : '1. Selecciona o busca al Médico / Especialidad:'}
               </label>
-              
+
               {medicoFijo ? (
-                <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between">
-                  <div>
-                    <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
-                    <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
-                    <p className="text-xs text-slate-600 mt-1">📍 {medicoSeleccionadoObj?.direccion} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio}</strong></p>
-                  </div>
-                  <span className="text-xs font-bold bg-blue-200 text-blue-800 px-2.5 py-1 rounded-full">
-                    Asignado
-                  </span>
+                <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl">
+                  <p className="font-bold text-slate-800 text-sm">{medicoSeleccionadoObj?.nombre}</p>
+                  <p className="text-xs text-blue-700 font-semibold">{medicoSeleccionadoObj?.especialidad}</p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    📍 {medicoSeleccionadoObj?.direccion || DIRECCION_DEFECTO} | 🏢 <strong>{medicoSeleccionadoObj?.consultorio || CONSULTORIO_DEFECTO}</strong>
+                  </p>
                 </div>
               ) : (
                 <div className="relative">
@@ -422,11 +348,7 @@ function AgendarContenido() {
                     placeholder="🔍 Escribe un nombre o especialidad (ej. Pediatría, Dr. Juan)..."
                     value={busquedaMedico}
                     onChange={(e) => handleBuscarMedico(e.target.value)}
-                    onFocus={() => {
-                      if (busquedaMedico.trim() !== '') {
-                        setMostrarDropdown(true);
-                      }
-                    }}
+                    onFocus={() => { if (busquedaMedico.trim() !== '') setMostrarDropdown(true); }}
                     className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
 
@@ -450,30 +372,23 @@ function AgendarContenido() {
                   )}
 
                   {medicoSeleccionadoObj && (
-                    <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
-                      <div>
-                        <span className="text-slate-400 font-semibold uppercase text-[10px] block">
-                          Lugar de Atención Presencial:
-                        </span>
-                        <p className="font-bold text-slate-800 text-xs">
-                          {medicoSeleccionadoObj.direccion || 'Av. San Jorge y Calle 10ma, Guayaquil'}
-                        </p>
-                        <p className="text-blue-700 font-extrabold mt-0.5">
-                          🏢 {medicoSeleccionadoObj.consultorio || 'Piso 2, Consultorio 204'}
-                        </p>
-                      </div>
+                    <div className="mt-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                      <span className="text-slate-400 font-semibold uppercase text-[10px] block">Lugar de Atención Presencial:</span>
+                      <p className="font-bold text-slate-800 text-xs">{medicoSeleccionadoObj.direccion || DIRECCION_DEFECTO}</p>
+                      <p className="text-blue-700 font-extrabold mt-0.5">🏢 {medicoSeleccionadoObj.consultorio || CONSULTORIO_DEFECTO}</p>
                     </div>
                   )}
                 </div>
               )}
             </div>
 
-            {/* FECHA */}
+            {/* FECHA (no se permiten fechas pasadas) */}
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase mb-2">2. Selecciona la Fecha:</label>
               <input
                 type="date"
                 value={fechaSeleccionada}
+                min={hoy}
                 onChange={(e) => {
                   setFechaSeleccionada(e.target.value);
                   setHoraSeleccionada('');
@@ -481,13 +396,18 @@ function AgendarContenido() {
                 className="w-full p-3 border rounded-xl text-slate-800 text-sm font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 required
               />
+              {fechaSeleccionada && fechaSeleccionada < hoy && (
+                <p className="text-xs text-rose-600 font-semibold mt-1">No se puede agendar en una fecha pasada.</p>
+              )}
             </div>
 
             {/* HORARIOS DISPONIBLES */}
-            {fechaSeleccionada && (
+            {fechaSeleccionada && fechaSeleccionada >= hoy && (
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase mb-2">3. Horarios Disponibles:</label>
-                {horariosDisponibles.length === 0 ? (
+                {cargandoHorarios ? (
+                  <p className="text-xs text-slate-500 p-3">Buscando horarios...</p>
+                ) : horariosDisponibles.length === 0 ? (
                   <p className="text-xs text-amber-700 bg-amber-50 p-3 rounded-lg border border-amber-200">
                     No hay turnos disponibles para esta fecha. Intenta con otro día.
                   </p>
@@ -512,7 +432,7 @@ function AgendarContenido() {
               </div>
             )}
 
-            {/* DATOS DEL PACIENTE CON BÚSQUEDA INTUITIVA (POR NOMBRE O CÉDULA) */}
+            {/* DATOS DEL PACIENTE */}
             <div className="border-t pt-6 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase">4. Datos del Paciente:</h3>
 
@@ -528,122 +448,137 @@ function AgendarContenido() {
                 </select>
               </div>
 
-              {/* BUSCADOR INTUITIVO DE PACIENTES */}
-              <div className="relative">
-                <label className="block text-xs font-semibold text-slate-600 mb-1">
-                  Buscar Paciente Existente (por Nombre o Cédula)
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    placeholder="🔍 Escribe el nombre o cédula del paciente..."
-                    value={busquedaPaciente}
-                    onChange={(e) => handleBuscarPacienteInput(e.target.value)}
-                    className="w-full p-3 border rounded-xl text-xs text-slate-800 font-semibold bg-white"
-                  />
-                  {pacienteSeleccionadoId && (
+              {modoPaciente === 'registrado' ? (
+                <div className="space-y-3">
+                  <label className="block text-xs font-semibold text-slate-600">¿Ya eres paciente? Ingresa tu número de cédula</label>
+
+                  {pacienteVerificado ? (
+                    <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between gap-2">
+                      <div className="text-xs">
+                        <p className="font-bold text-emerald-800">✅ Paciente encontrado: {pacienteVerificado.nombre}</p>
+                        <p className="text-emerald-700">🪪 Cédula {enmascararCedula(pacienteVerificado.cedula)}</p>
+                      </div>
+                      <button type="button" onClick={limpiarPaciente} className="text-xs text-rose-600 font-bold hover:underline whitespace-nowrap">
+                        Cambiar
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="🔍 Ej. 0912345678"
+                        value={cedulaBusqueda}
+                        maxLength={15}
+                        onChange={(e) => {
+                          setCedulaBusqueda(e.target.value.trim());
+                          setCedulaNoEncontrada(false);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            verificarCedula();
+                          }
+                        }}
+                        className="flex-1 p-3 border rounded-xl text-xs text-slate-800 font-semibold bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={verificarCedula}
+                        disabled={verificando || !cedulaBusqueda.trim()}
+                        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold px-4 rounded-xl transition"
+                      >
+                        {verificando ? 'Buscando...' : 'Buscar'}
+                      </button>
+                    </div>
+                  )}
+
+                  {cedulaNoEncontrada && (
+                    <p className="text-xs text-amber-700 bg-amber-50 p-3 rounded-lg border border-amber-200">
+                      No encontramos un paciente con esa cédula. Si es tu primera cita, regístrate como nuevo paciente.
+                    </p>
+                  )}
+
+                  {!pacienteVerificado && (
                     <button
                       type="button"
-                      onClick={limpiarPacienteSeleccionado}
-                      className="absolute right-3 top-3 text-xs text-rose-600 font-bold hover:underline"
+                      onClick={irANuevoPaciente}
+                      className="w-full border-2 border-dashed border-blue-300 hover:border-blue-500 hover:bg-blue-50 text-blue-700 text-xs font-bold py-3 rounded-xl transition"
                     >
-                      Cambiar / Limpiar
+                      🆕 Soy Nuevo Paciente
                     </button>
                   )}
                 </div>
-
-                {/* DROPDOWN DE SUGERENCIAS DE PACIENTES */}
-                {sugerenciasPacientes.length > 0 && !pacienteSeleccionadoId && (
-                  <div className="absolute left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-2xl mt-1 max-h-48 overflow-y-auto z-50 divide-y divide-slate-100">
-                    {sugerenciasPacientes.map((pac) => (
-                      <button
-                        key={pac.id}
-                        type="button"
-                        onClick={() => seleccionarPacienteExistente(pac)}
-                        className="w-full text-left p-3 hover:bg-blue-50 transition flex justify-between items-center text-xs"
-                      >
-                        <div>
-                          <p className="font-bold text-slate-800">{pac.nombre}</p>
-                          <p className="text-[11px] text-slate-500">🪪 {pac.cedula} | 📱 {pac.telefono || 'Sin tel'}</p>
-                        </div>
-                        <span className="bg-blue-100 text-blue-700 font-bold px-2 py-1 rounded text-[10px]">Seleccionar ➔</span>
-                      </button>
-                    ))}
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold text-blue-700">🆕 Registro de Nuevo Paciente</span>
+                    <button type="button" onClick={irARegistrado} className="text-xs text-slate-500 font-bold hover:underline">
+                      ← Ya soy paciente
+                    </button>
                   </div>
-                )}
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre Completo</label>
-                  <input
-                    type="text"
-                    placeholder="Ej. María López"
-                    value={nombrePaciente}
-                    onChange={(e) => setNombrePaciente(e.target.value)}
-                    className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
-                    required
-                  />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre Completo</label>
+                      <input
+                        type="text"
+                        placeholder="Ej. María López"
+                        value={nombrePaciente}
+                        onChange={(e) => setNombrePaciente(e.target.value)}
+                        className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Cédula de Identidad</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Ej. 0912345678"
+                        value={cedulaPaciente}
+                        maxLength={15}
+                        onChange={(e) => setCedulaPaciente(e.target.value.trim())}
+                        className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono / WhatsApp</label>
+                      <input
+                        type="tel"
+                        placeholder="Ej. 0991234567"
+                        value={telefonoPaciente}
+                        onChange={(e) => setTelefonoPaciente(e.target.value)}
+                        className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico</label>
+                      <input
+                        type="email"
+                        placeholder="ejemplo@correo.com"
+                        value={emailPaciente}
+                        onChange={(e) => setEmailPaciente(e.target.value)}
+                        className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-1">Te enviaremos aquí la confirmación de tu cita.</p>
+                    </div>
+                  </div>
                 </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Cédula de Identidad</label>
-                  <input
-                    type="text"
-                    placeholder="Ej. 0912345678"
-                    value={cedulaPaciente}
-                    onChange={(e) => {
-                      if (e.target.value.length <= 10) setCedulaPaciente(e.target.value);
-                    }}
-                    className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono / WhatsApp</label>
-                  <input
-                    type="tel"
-                    placeholder="Ej. 0991234567"
-                    value={telefonoPaciente}
-                    onChange={(e) => setTelefonoPaciente(e.target.value)}
-                    className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Correo Electrónico</label>
-                  <input
-                    type="email"
-                    placeholder="ejemplo@correo.com"
-                    value={emailPaciente}
-                    onChange={(e) => setEmailPaciente(e.target.value)}
-                    className="w-full p-2.5 border rounded-xl text-xs text-slate-800"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">¿Dónde deseas recibir el enlace/confirmación?</label>
-                <select
-                  value={metodoNotificacion}
-                  onChange={(e) => setMetodoNotificacion(e.target.value as 'whatsapp' | 'email' | 'ambos')}
-                  className="w-full p-2.5 border rounded-xl text-xs text-slate-800 font-medium"
-                >
-                  <option value="whatsapp">📱 WhatsApp</option>
-                  <option value="email">✉️ Correo Electrónico</option>
-                  <option value="ambos">📲 Ambos (WhatsApp + Correo)</option>
-                </select>
-              </div>
+              )}
             </div>
+
+            {errorMsg && <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">{errorMsg}</div>}
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-xl shadow transition text-sm"
+              className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white font-bold py-3 px-4 rounded-xl shadow transition text-sm"
             >
               {loading ? 'Procesando reserva...' : '✅ Confirmar y Reservar Cita'}
             </button>
@@ -660,7 +595,7 @@ function AgendarContenido() {
 
 export default function AgendarPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-500 font-medium">Cargando buscador...</div>}>
+    <Suspense fallback={<div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-500 font-medium">Cargando...</div>}>
       <AgendarContenido />
     </Suspense>
   );

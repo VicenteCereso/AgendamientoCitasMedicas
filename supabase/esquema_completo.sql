@@ -3,7 +3,7 @@
 -- Crea todos los objetos en un proyecto de Supabase NUEVO (vacío).
 --
 -- Generado a partir del esquema de desarrollo del 2026-11-17
--- (incluye las migraciones 01, 02 y 03 de supabase/migraciones).
+-- (incluye las migraciones 01 a 04 de supabase/migraciones).
 --
 -- Uso: SQL Editor del proyecto nuevo > pegar todo > Run.
 -- Después seguir los pasos de "DATOS INICIALES" al final.
@@ -180,8 +180,9 @@ $function$;
 
 -- ---------------------------------------------------------------------
 -- 11) Seguridad a nivel de fila (RLS) y políticas
---     citas, pacientes, disponibilidad_medico y recetas_medicas quedan sin RLS,
---     igual que en desarrollo y producción.
+--     Todas las tablas tienen RLS. El navegador sin sesión (anon) solo lee
+--     especialidades y columnas públicas de medicos; la agenda pública usa las
+--     rutas /api/agenda/* del servidor (service role).
 -- ---------------------------------------------------------------------
 
 -- especialidades: lectura pública; escrituras solo desde la API (service role)
@@ -222,6 +223,34 @@ create policy "diagnosticos_propios" on public.diagnosticos_pacientes
 
 -- correos_enviados: sin políticas, solo el servidor (service role) lee y escribe
 alter table public.correos_enviados enable row level security;
+
+-- pacientes: directorio compartido por los médicos del sistema
+alter table public.pacientes enable row level security;
+create policy "pacientes_medicos" on public.pacientes
+  for all to authenticated
+  using ((select public.mi_medico_id()) is not null)
+  with check ((select public.mi_medico_id()) is not null);
+
+-- citas, disponibilidad_medico y recetas_medicas: cada médico lo suyo; el admin, todo
+alter table public.citas enable row level security;
+create policy "citas_propias" on public.citas
+  for all to authenticated
+  using (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()))
+  with check (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()));
+
+alter table public.disponibilidad_medico enable row level security;
+create policy "disponibilidad_propia" on public.disponibilidad_medico
+  for all to authenticated
+  using (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()))
+  with check (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()));
+
+alter table public.recetas_medicas enable row level security;
+create policy "recetas_propias" on public.recetas_medicas
+  for all to authenticated
+  using (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()))
+  with check (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()));
+
+revoke all on public.pacientes, public.citas, public.disponibilidad_medico, public.recetas_medicas from anon;
 
 -- ---------------------------------------------------------------------
 -- 12) Especialidades base (opcional, se pueden editar luego en Gestionar Médicos)

@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 
 interface CitaPaciente {
@@ -30,54 +29,45 @@ export default function ConsultarPage() {
 
     setLoading(true);
     setBuscado(true);
-
-    const { data: paciente } = await supabase
-      .from('pacientes')
-      .select('id')
-      .eq('cedula', cedula.trim())
-      .single();
-
-    if (!paciente) {
+    try {
+      // Va por el servidor: el navegador sin sesión no puede leer pacientes ni citas (RLS)
+      const res = await fetch('/api/agenda/mis-citas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cedula: cedula.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'No se pudieron consultar las citas.');
+        setCitas([]);
+      } else {
+        setCitas((data.citas || []) as CitaPaciente[]);
+      }
+    } catch {
+      alert('No se pudo conectar con el servidor. Intenta nuevamente.');
       setCitas([]);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    // Obtenemos la fecha y hora actual en formato ISO para el filtro
-    const fechaHoraActual = new Date().toISOString();
-
-    const { data: citasData } = await supabase
-      .from('citas')
-      .select(`
-        id,
-        fecha_hora,
-        estado,
-        tipo_consulta,
-        enlace_videollamada,
-        medicos ( nombre, especialidad, direccion, consultorio )
-      `)
-      .eq('paciente_id', paciente.id)
-      .gte('fecha_hora', fechaHoraActual) // <--- FILTRA DESDE LA FECHA Y HORA ACTUAL EN ADELANTE
-      .order('fecha_hora', { ascending: true }); // <--- ORDENA DE LA MÁS PRÓXIMA A LA MÁS LEJANA
-
-    if (citasData) {
-      setCitas(citasData as unknown as CitaPaciente[]);
-    }
-    setLoading(false);
   }
 
   async function cancelarCita(id: string) {
     if (!confirm('¿Estás seguro de que deseas cancelar esta cita?')) return;
 
-    const { error } = await supabase
-      .from('citas')
-      .update({ estado: 'cancelada' })
-      .eq('id', id);
-
-    if (!error) {
-      setCitas(citas.map((c) => (c.id === id ? { ...c, estado: 'cancelada' } : c)));
-    } else {
-      alert('Error al cancelar la cita: ' + error.message);
+    try {
+      const res = await fetch('/api/agenda/cancelar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cedula: cedula.trim(), citaId: id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setCitas(citas.map((c) => (c.id === id ? { ...c, estado: 'cancelada' } : c)));
+      } else {
+        alert('Error al cancelar la cita: ' + (data.error || 'intenta nuevamente.'));
+      }
+    } catch {
+      alert('No se pudo conectar con el servidor. Intenta nuevamente.');
     }
   }
 

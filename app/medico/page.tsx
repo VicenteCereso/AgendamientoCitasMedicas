@@ -4,6 +4,9 @@ import { useState, useEffect, useMemo } from 'react';
 import { MedicoService, type Especialidad, type EstadoFechaRecurrente } from '@/services/medico.service';
 import { EmailService } from '@/services/email.service';
 import ReporteCorreos from './ReporteCorreos';
+import CalendarioHorarios from './CalendarioHorarios';
+import { esPasado, generarEnlaceVideollamada } from '@/lib/agenda';
+import { useHoyEcuador } from '@/lib/useHoyEcuador';
 
 interface CitaDetalle {
   id: string;
@@ -168,7 +171,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const [evaluandoRec, setEvaluandoRec] = useState<boolean>(false);
 
   // Configuración Horarios Multi-Fecha
-  const [fechaInputActual, setFechaInputActual] = useState<string>('');
   const [fechasSeleccionadas, setFechasSeleccionadas] = useState<string[]>([]);
   const [horaInicio, setHoraInicio] = useState<string>('08:00');
   const [horaFin, setHoraFin] = useState<string>('17:00');
@@ -213,7 +215,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     const hoyStr = `${anio}-${mes}-${dia}`;
 
     setFechaFiltro(hoyStr);
-    setFechaInputActual(hoyStr);
     setFechaManual(hoyStr);
     setFechaHistoricaRetrof(hoyStr);
     inicializar();
@@ -741,6 +742,23 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const medicoAgendaId: string = (esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id) || '';
   const agendaEsPsicologia = medicoEsPsicologia(medicoAgendaId);
 
+  // Fecha de hoy (Ecuador): no se permite agendar ni reagendar en fechas pasadas
+  const hoyAgenda = useHoyEcuador();
+
+  // Enlace público de agenda de un médico: el paciente lo abre y el médico ya viene seleccionado
+  async function copiarEnlaceAgenda(medicoId: string, nombre: string) {
+    const enlace = `${window.location.origin}/agendar?medicoId=${medicoId}`;
+    try {
+      await navigator.clipboard.writeText(enlace);
+      alert(`Enlace de agenda de ${nombre} copiado:
+${enlace}
+
+Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
+    } catch {
+      prompt('Copia este enlace de agenda:', enlace);
+    }
+  }
+
   useEffect(() => {
   setHistorialConsultaLibre([]);
   setPacienteConsultaLibre(null);
@@ -911,7 +929,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Fecha de Cita</label>
-                <input type="date" value={fechaManual} onChange={(e) => setFechaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+                <input type="date" value={fechaManual} min={hoyAgenda} onChange={(e) => setFechaManual(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
               </div>
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Modalidad</label>
@@ -948,11 +966,11 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Desde</label>
-                <input type="date" value={recDesde} onChange={(e) => cambiarParametroRecurrencia(() => setRecDesde(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+                <input type="date" value={recDesde} min={hoyAgenda} onChange={(e) => cambiarParametroRecurrencia(() => setRecDesde(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
               </div>
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Hasta</label>
-                <input type="date" value={recHasta} min={recDesde || undefined} onChange={(e) => cambiarParametroRecurrencia(() => setRecHasta(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
+                <input type="date" value={recHasta} min={recDesde || hoyAgenda} onChange={(e) => cambiarParametroRecurrencia(() => setRecHasta(e.target.value))} className="w-full p-2.5 border rounded-xl text-xs font-semibold" />
               </div>
             </div>
 
@@ -1214,6 +1232,10 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
   async function confirmarReagendamiento() {
     if (!citaEditando || !nuevaFechaReagendar || !nuevaHoraReagendar) return;
+    if (esPasado(nuevaFechaReagendar, nuevaHoraReagendar)) {
+      alert('No se puede reagendar a una fecha u hora que ya pasó.');
+      return;
+    }
     setLoadingReagendar(true);
     try {
       await MedicoService.reagendarCita(
@@ -1231,17 +1253,6 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       alert('Error al reagendar: ' + err.message);
     }
     setLoadingReagendar(false);
-  }
-
-  function agregarFechaLista() {
-    if (!fechaInputActual) return;
-    if (!fechasSeleccionadas.includes(fechaInputActual)) {
-      setFechasSeleccionadas([...fechasSeleccionadas, fechaInputActual].sort());
-    }
-  }
-
-  function quitarFechaLista(fechaRemover: string) {
-    setFechasSeleccionadas(fechasSeleccionadas.filter((f) => f !== fechaRemover));
   }
 
   async function guardarHorariosMultiplesFechas() {
@@ -1435,6 +1446,10 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       alert('Selecciona fecha y hora.');
       return;
     }
+    if (esPasado(fechaManual, horaManualSeleccionada)) {
+      alert('No se puede agendar en una fecha u hora que ya pasó.');
+      return;
+    }
 
     setLoadingManual(true);
     try {
@@ -1446,11 +1461,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       const pacId = pac.id;
 
       const fechaHoraISO = `${fechaManual}T${horaManualSeleccionada}:00`;
-      let enlaceJitsi = null;
-      if (tipoConsultaManual === 'telemedicina') {
-        const salaUnica = `ConsultaMedica-${targetId.substring(0, 5)}-${fechaManual}-${horaManualSeleccionada.replace(':', '')}`;
-        enlaceJitsi = `https://meet.jit.si/${salaUnica}`;
-      }
+      const enlaceJitsi = tipoConsultaManual === 'telemedicina' ? generarEnlaceVideollamada() : null;
 
       await MedicoService.agendarCitaManual({
         medico_id: targetId,
@@ -1698,12 +1709,23 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
               {esAdmin ? 'ADMINISTRADOR' : especialidadDoctor}
             </span>
           </div>
+          <div className="flex gap-2 flex-wrap justify-end">
+          {!esAdmin && perfilUsuario?.id && (
+            <button
+              onClick={() => copiarEnlaceAgenda(perfilUsuario.id, perfilUsuario.nombre || 'tu agenda')}
+              className="bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold py-2.5 px-4 rounded-xl border border-blue-200 transition flex items-center gap-1.5"
+              title="Copia el enlace para que tus pacientes agenden directamente contigo"
+            >
+              🔗 Copiar mi enlace de agenda
+            </button>
+          )}
           <button 
             onClick={() => MedicoService.cerrarSesion().then(() => window.location.reload())} 
             className="bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-900 text-xs font-bold py-2.5 px-4 rounded-xl border border-slate-200 transition flex items-center gap-1.5"
           >
             🚪 Cerrar Sesión
           </button>
+          </div>
         </div>
 
         {/* SELECTOR ADMIN */}
@@ -2686,40 +2708,22 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
         {tabActiva === 'horarios' && (
           <div className="space-y-6">
             <div className="p-6 bg-slate-50/70 rounded-3xl border border-slate-200/80 space-y-5">
-              <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
-                📅 Configurar Horarios Seleccionando Uno o Varios Días en el Calendario
-              </h3>
-
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
-                <label className="block text-xs font-bold text-slate-700 uppercase">
-                  1. Selecciona fecha y agrégala a la lista
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="date"
-                    value={fechaInputActual}
-                    onChange={(e) => setFechaInputActual(e.target.value)}
-                    className="p-2.5 border rounded-xl text-xs bg-white font-semibold flex-1 md:w-60"
-                  />
-                  <button type="button" onClick={agregarFechaLista} className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition">
-                    ➕ Agregar Fecha
-                  </button>
-                </div>
-
-                {fechasSeleccionadas.length > 0 && (
-                  <div className="pt-2">
-                    <p className="text-[11px] font-bold text-slate-500 uppercase mb-2">Fechas seleccionadas ({fechasSeleccionadas.length}):</p>
-                    <div className="flex flex-wrap gap-2">
-                      {fechasSeleccionadas.map((f) => (
-                        <span key={f} className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-800 text-xs font-bold px-3 py-1 rounded-xl">
-                          📅 {f}
-                          <button type="button" onClick={() => quitarFechaLista(f)} className="text-indigo-400 hover:text-red-600 font-black ml-1">✕</button>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+              <div>
+                <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">📅 Calendario de Horarios</h3>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  1. Toca los días que quieres configurar (puedes elegir varios). 2. Define el horario abajo y aplícalo.
+                  Toca cualquier día para ver su detalle o eliminar su horario.
+                </p>
               </div>
+
+              <CalendarioHorarios
+                disponibilidades={disponibilidades}
+                citas={citas}
+                hoy={hoyAgenda}
+                fechasSeleccionadas={fechasSeleccionadas}
+                onCambiarSeleccion={setFechasSeleccionadas}
+                onBorrarRegla={borrarHorario}
+              />
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
@@ -2767,34 +2771,11 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                   disabled={guardandoHorario || fechasSeleccionadas.length === 0}
                   className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold py-3 px-6 rounded-xl shadow-sm transition"
                 >
-                  {guardandoHorario ? 'Guardando...' : `💾 Aplicar Horario a (${fechasSeleccionadas.length}) Fechas`}
+                  {guardandoHorario ? 'Guardando...' : fechasSeleccionadas.length === 0 ? 'Selecciona días en el calendario' : `💾 Aplicar Horario a ${fechasSeleccionadas.length} día(s)`}
                 </button>
               </div>
             </div>
 
-            <div className="space-y-3">
-              <h4 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">Horarios Configurados</h4>
-              {disponibilidades.length === 0 ? (
-                <p className="text-xs text-slate-500 italic">No hay horarios registrados.</p>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {disponibilidades.map((d) => (
-                    <div key={d.id} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm flex justify-between items-center">
-                      <div>
-                        <h5 className="font-bold text-xs text-slate-800">
-                          {d.fecha_especifica ? `📅 Fecha: ${d.fecha_especifica}` : `Regla general día ${d.dia_semana}`}
-                        </h5>
-                        <p className="text-xs text-slate-600 mt-0.5">🕒 {d.hora_inicio} a {d.hora_fin} ({d.duracion_cita_minutos} min)</p>
-                        {d.hora_inicio_almuerzo && (
-                          <p className="text-[11px] text-amber-700 font-bold mt-1">🍱 Almuerzo: {d.hora_inicio_almuerzo} - {d.hora_fin_almuerzo}</p>
-                        )}
-                      </div>
-                      <button onClick={() => borrarHorario(d.id)} className="text-rose-600 hover:bg-rose-50 p-2 rounded-xl text-xs font-bold transition">🗑️</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         )}
 
@@ -3022,7 +3003,10 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
                         {' '}| ✉️ {med.email}
                       </p>
                     </div>
-                    <button onClick={() => seleccionarParaEditarMedico(med)} className="bg-slate-100 hover:bg-slate-200 text-xs font-bold py-1.5 px-3 rounded-xl border">Editar</button>
+                    <div className="flex gap-2 shrink-0">
+                      <button onClick={() => copiarEnlaceAgenda(med.id, med.nombre)} title="Copiar enlace de agenda para pacientes" className="bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold py-1.5 px-3 rounded-xl border border-blue-200">🔗 Enlace</button>
+                      <button onClick={() => seleccionarParaEditarMedico(med)} className="bg-slate-100 hover:bg-slate-200 text-xs font-bold py-1.5 px-3 rounded-xl border">Editar</button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -3035,7 +3019,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
           <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-xl">
               <h3 className="font-bold text-slate-800 text-sm">Reagendar Cita</h3>
-              <input type="date" value={nuevaFechaReagendar} onChange={(e) => setNuevaFechaReagendar(e.target.value)} className="w-full p-3 border rounded-xl text-xs font-semibold" />
+              <input type="date" value={nuevaFechaReagendar} min={hoyAgenda} onChange={(e) => setNuevaFechaReagendar(e.target.value)} className="w-full p-3 border rounded-xl text-xs font-semibold" />
               <div className="grid grid-cols-3 gap-2 max-h-45 overflow-y-auto">
                 {horariosReagendar.map((h) => (
                   <button key={h} onClick={() => setNuevaHoraReagendar(h)} className={`p-2 text-xs font-bold rounded-xl border ${nuevaHoraReagendar === h ? 'bg-blue-600 text-white' : 'bg-slate-50'}`}>{h}</button>
