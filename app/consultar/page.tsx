@@ -74,7 +74,7 @@ export default function ConsultarPage() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
       <header className="bg-white border-b border-slate-200">
-        <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link href="/" className="flex items-center space-x-2">
             <span className="text-3xl">🩺</span>
             <span className="text-xl font-bold text-slate-800">
@@ -87,7 +87,7 @@ export default function ConsultarPage() {
         </div>
       </header>
 
-      <main className="flex-1 py-10 px-6 max-w-xl mx-auto w-full">
+      <main className="flex-1 py-10 px-6 max-w-2xl mx-auto w-full">
         <div className="bg-white rounded-2xl shadow-md p-8 border border-slate-100">
           <h1 className="text-2xl font-bold text-slate-800 mb-1">🔎 Consultar Mis Citas</h1>
           <p className="text-xs text-slate-500 mb-6">Ingresa tu número de cédula para ver tus próximas citas registradas.</p>

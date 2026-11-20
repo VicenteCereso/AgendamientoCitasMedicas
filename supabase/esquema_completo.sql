@@ -3,7 +3,7 @@
 -- Crea todos los objetos en un proyecto de Supabase NUEVO (vacío).
 --
 -- Generado a partir del esquema de desarrollo del 2026-11-17
--- (incluye las migraciones 01 a 04 de supabase/migraciones).
+-- (incluye las migraciones 01 a 04, 06 y 07 de supabase/migraciones).
 --
 -- Uso: SQL Editor del proyecto nuevo > pegar todo > Run.
 -- Después seguir los pasos de "DATOS INICIALES" al final.
@@ -153,6 +153,44 @@ create index correos_enviados_created_idx on public.correos_enviados (created_at
 create index correos_enviados_cita_idx    on public.correos_enviados (cita_id);
 
 -- ---------------------------------------------------------------------
+-- 9b) Datos de facturación electrónica de cada paciente (los de la última factura)
+-- ---------------------------------------------------------------------
+create table public.datos_facturacion (
+  paciente_id         uuid primary key references public.pacientes(id) on delete cascade,
+  tipo_identificacion text not null check (tipo_identificacion in ('04', '05', '06', '08')),
+  identificacion      text not null,
+  razon_social        text not null,
+  direccion           text,
+  email               text,
+  telefono            text,
+  updated_at          timestamptz not null default now(),
+  updated_by          uuid references public.medicos(id) on delete set null
+);
+
+-- ---------------------------------------------------------------------
+-- 9c) Facturas generadas (una sola vigente por cita; los errores no cuentan)
+-- ---------------------------------------------------------------------
+create table public.facturas (
+  id                  uuid primary key default gen_random_uuid(),
+  created_at          timestamptz not null default now(),
+  medico_id           uuid not null references public.medicos(id) on delete restrict,
+  paciente_id         uuid references public.pacientes(id) on delete set null,
+  cita_id             uuid references public.citas(id) on delete set null,
+  tipo_identificacion text not null,
+  identificacion      text not null,
+  razon_social        text not null,
+  importe_total       numeric(12, 2) not null,
+  estado              text not null default 'procesando' check (estado in ('procesando', 'generada', 'error')),
+  numero              text,
+  clave_acceso        text,
+  respuesta           jsonb,
+  error               text
+);
+create unique index facturas_cita_vigente_uidx
+  on public.facturas (cita_id) where cita_id is not null and estado <> 'error';
+create index facturas_medico_created_idx on public.facturas (medico_id, created_at desc);
+
+-- ---------------------------------------------------------------------
 -- 10) Funciones auxiliares para las políticas
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.mi_medico_id()
@@ -251,6 +289,21 @@ create policy "recetas_propias" on public.recetas_medicas
   with check (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()));
 
 revoke all on public.pacientes, public.citas, public.disponibilidad_medico, public.recetas_medicas from anon;
+
+-- datos_facturacion: igual que pacientes (directorio compartido por los médicos)
+alter table public.datos_facturacion enable row level security;
+create policy "datos_facturacion_medicos" on public.datos_facturacion
+  for all to authenticated
+  using ((select public.mi_medico_id()) is not null)
+  with check ((select public.mi_medico_id()) is not null);
+revoke all on public.datos_facturacion from anon;
+
+-- facturas: lectura de las propias (admin, todas); escrituras solo desde la API (service role)
+alter table public.facturas enable row level security;
+create policy "facturas_lectura_propias" on public.facturas
+  for select to authenticated
+  using (medico_id = (select public.mi_medico_id()) or (select public.soy_admin()));
+revoke all on public.facturas from anon;
 
 -- ---------------------------------------------------------------------
 -- 12) Especialidades base (opcional, se pueden editar luego en Gestionar Médicos)
