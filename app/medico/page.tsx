@@ -1,12 +1,18 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { MedicoService, type Especialidad, type EstadoFechaRecurrente } from '@/services/medico.service';
 import { EmailService } from '@/services/email.service';
 import ReporteCorreos from './ReporteCorreos';
 import CalendarioHorarios from './CalendarioHorarios';
+import PaginacionHistorial, { rangoAtenciones } from './PaginacionHistorial';
+import Facturacion from './Facturacion';
 import { esPasado, generarEnlaceVideollamada } from '@/lib/agenda';
 import { useHoyEcuador } from '@/lib/useHoyEcuador';
+import { useCierreInactividad, MINUTOS_INACTIVIDAD } from '@/lib/useCierreInactividad';
+
+const CLAVE_CIERRE_INACTIVIDAD = 'cierre_por_inactividad';
+const HISTORIAL_POR_PAGINA = 5;
 
 interface CitaDetalle {
   id: string;
@@ -57,7 +63,10 @@ function esAtencionPsicologica(medico?: { especialidad?: string | null; especial
 }
 
 export default function PanelMedicoPage() {
-  const [tabActiva, setTabActiva] = useState<'citas' | 'agendar_asistente' | 'consultar_expediente' | 'horarios' | 'gestion_medicos' | 'correos'>('citas');
+  const [tabActiva, setTabActiva] = useState<'citas' | 'agendar_asistente' | 'consultar_expediente' | 'facturacion' | 'horarios' | 'gestion_medicos' | 'correos'>('citas');
+  // Última consulta finalizada: se ofrece facturarla. citaAFacturar la abre en la pestaña de facturación.
+  const [citaRecienAtendida, setCitaRecienAtendida] = useState<{ id: string; nombre: string } | null>(null);
+  const [citaAFacturar, setCitaAFacturar] = useState<string | null>(null);
 
   // Autenticación y Perfil
   const [userAuth, setUserAuth] = useState<any>(null);
@@ -126,7 +135,13 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const [criterioBusquedaLibre, setCriterioBusquedaLibre] = useState<string>('');
   const [sugerenciasPacientes, setSugerenciasPacientes] = useState<any[]>([]);
   const [pacienteConsultaLibre, setPacienteConsultaLibre] = useState<any | null>(null);
+  // Página actual del historial del expediente (5 atenciones, de la más reciente a la más antigua)
   const [historialConsultaLibre, setHistorialConsultaLibre] = useState<any[]>([]);
+  const [totalHistorialLibre, setTotalHistorialLibre] = useState<number>(0);
+  const [paginaHistorialLibre, setPaginaHistorialLibre] = useState<number>(0);
+  const [cargandoHistorialLibre, setCargandoHistorialLibre] = useState<boolean>(false);
+  // Paciente cuyo historial se pidió por última vez: evita que una respuesta lenta de otro paciente lo pise.
+  const pacienteHistorialLibreRef = useRef<string | null>(null);
   const [historiaLibreSeleccionada, setHistoriaLibreSeleccionada] = useState<any | null>(null);
   const [buscandoLibre, setBuscandoLibre] = useState<boolean>(false);
 
@@ -200,7 +215,11 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
   const [proximaSesionMap, setProximaSesionMap] = useState<{ [key: string]: string }>({});
   const [diagPsicoMap, setDiagPsicoMap] = useState<{ [citaId: string]: DiagnosticoPsico }>({});
 
+  // Historial paginado: página actual (5 atenciones, de la más reciente a la más antigua)
   const [historiasPorCita, setHistoriasPorCita] = useState<{ [citaId: string]: any[] }>({});
+  const [totalHistoriasPorCita, setTotalHistoriasPorCita] = useState<{ [citaId: string]: number }>({});
+  const [paginaHistorial, setPaginaHistorial] = useState<{ [citaId: string]: number }>({});
+  const [cargandoPaginaCitaId, setCargandoPaginaCitaId] = useState<string | null>(null);
   const [historiaSeleccionadaDetalle, setHistoriaSeleccionadaDetalle] = useState<{ [citaId: string]: any }>({});
   const [loadingHistorialInline, setLoadingHistorialInline] = useState<boolean>(false);
 
@@ -217,8 +236,28 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setFechaFiltro(hoyStr);
     setFechaManual(hoyStr);
     setFechaHistoricaRetrof(hoyStr);
+
+    try {
+      if (window.sessionStorage.getItem(CLAVE_CIERRE_INACTIVIDAD)) {
+        window.sessionStorage.removeItem(CLAVE_CIERRE_INACTIVIDAD);
+        setErrorLogin(`Tu sesión se cerró tras ${MINUTOS_INACTIVIDAD} minutos sin actividad. Vuelve a iniciar sesión.`);
+      }
+    } catch {
+      // sessionStorage bloqueado: solo se omite el aviso.
+    }
+
     inicializar();
   }, []);
+
+  // Cierra la sesión automáticamente si el médico deja el panel abierto sin usarlo.
+  useCierreInactividad(!!userAuth, () => {
+    try {
+      window.sessionStorage.setItem(CLAVE_CIERRE_INACTIVIDAD, '1');
+    } catch {
+      // sin aviso, pero la sesión se cierra igual
+    }
+    MedicoService.cerrarSesion().finally(() => window.location.reload());
+  });
 
   async function inicializar() {
     setLoadingAuth(true);
@@ -418,16 +457,29 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     setModoCrearPacienteMigracion(false);
     setEditandoPaciente(false);
 
+    setHistorialConsultaLibre([]);
+    setTotalHistorialLibre(0);
+    setHistoriaLibreSeleccionada(null);
+    await cargarHistorialLibre(pac.id, 0);
+  }
+
+  // Carga una página del historial del expediente (0 = las 5 atenciones más recientes).
+  async function cargarHistorialLibre(pacienteId: string, pagina: number) {
+    pacienteHistorialLibreRef.current = pacienteId;
+    setCargandoHistorialLibre(true);
     try {
-      const historial = await MedicoService.obtenerHistorialPaciente(pac.id, medicoAgendaId);
-      setHistorialConsultaLibre(historial);
-      if (historial.length > 0) {
-        setHistoriaLibreSeleccionada(historial[0]);
-      } else {
-        setHistoriaLibreSeleccionada(null);
-      }
-    } catch (err: any) {
-      alert('Error al cargar historial: ' + err.message);
+      const { historias, total } = await MedicoService.obtenerHistorialPagina(
+        pacienteId, medicoAgendaId, pagina, HISTORIAL_POR_PAGINA
+      );
+      if (pacienteHistorialLibreRef.current !== pacienteId) return; // ya se eligió otro paciente
+      setHistorialConsultaLibre(historias);
+      setTotalHistorialLibre(total);
+      setPaginaHistorialLibre(pagina);
+      setHistoriaLibreSeleccionada(historias[0] || null);
+    } catch (err) {
+      alert('Error al cargar historial: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      if (pacienteHistorialLibreRef.current === pacienteId) setCargandoHistorialLibre(false);
     }
   }
 
@@ -505,11 +557,7 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
 
       alert('¡Sesión histórica registrada con éxito en el expediente del paciente!');
 
-      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id, medicoAgendaId);
-      setHistorialConsultaLibre(historialActualizado);
-      if (historialActualizado.length > 0) {
-        setHistoriaLibreSeleccionada(historialActualizado[0]);
-      }
+      await cargarHistorialLibre(pacienteConsultaLibre.id, 0);
 
       setModoCrearHistorico(false);
       setMotivoHistoricoRetrof('');
@@ -549,12 +597,8 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
       });
 
       alert('¡Atención histórica registrada con éxito en el expediente del paciente!');
-      
-      const historialActualizado = await MedicoService.obtenerHistorialPaciente(pacienteConsultaLibre.id, medicoAgendaId);
-      setHistorialConsultaLibre(historialActualizado);
-      if (historialActualizado.length > 0) {
-        setHistoriaLibreSeleccionada(historialActualizado[0]);
-      }
+
+      await cargarHistorialLibre(pacienteConsultaLibre.id, 0);
 
       setModoCrearHistorico(false);
       setMotivoHistoricoRetrof('');
@@ -700,16 +744,25 @@ const [nuevaPassword, setNuevaPassword] = useState<string>('');
     if (historiasPorCita[citaId]) return;
 
     setLoadingHistorialInline(true);
-    try {
-      const historial = await MedicoService.obtenerHistorialPaciente(pacienteId, medicoAgendaId);
-      setHistoriasPorCita(prev => ({ ...prev, [citaId]: historial }));
-      if (historial.length > 0) {
-        setHistoriaSeleccionadaDetalle(prev => ({ ...prev, [citaId]: historial[0] }));
-      }
-    } catch (err: any) {
-      alert('Error al cargar historial: ' + err.message);
-    }
+    await cargarPaginaHistorial(citaId, pacienteId, 0);
     setLoadingHistorialInline(false);
+  }
+
+  // Carga una página del historial (0 = las 5 atenciones más recientes) y selecciona la primera.
+  async function cargarPaginaHistorial(citaId: string, pacienteId: string, pagina: number) {
+    setCargandoPaginaCitaId(citaId);
+    try {
+      const { historias, total } = await MedicoService.obtenerHistorialPagina(
+        pacienteId, medicoAgendaId, pagina, HISTORIAL_POR_PAGINA
+      );
+      setHistoriasPorCita(prev => ({ ...prev, [citaId]: historias }));
+      setTotalHistoriasPorCita(prev => ({ ...prev, [citaId]: total }));
+      setPaginaHistorial(prev => ({ ...prev, [citaId]: pagina }));
+      setHistoriaSeleccionadaDetalle(prev => ({ ...prev, [citaId]: historias[0] }));
+    } catch (err) {
+      alert('Error al cargar historial: ' + (err instanceof Error ? err.message : String(err)));
+    }
+    setCargandoPaginaCitaId(null);
   }
 
   function agregarFilaMedicamento(citaId: string) {
@@ -760,10 +813,15 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
   }
 
   useEffect(() => {
+  pacienteHistorialLibreRef.current = null;
   setHistorialConsultaLibre([]);
+  setTotalHistorialLibre(0);
+  setPaginaHistorialLibre(0);
   setPacienteConsultaLibre(null);
   setHistoriaLibreSeleccionada(null);
   setHistoriasPorCita({});
+  setTotalHistoriasPorCita({});
+  setPaginaHistorial({});
   setHistorialVisibleCitaId(null);
 }, [medicoAgendaId]);
 
@@ -885,6 +943,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
 
       alert('¡Sesión registrada con éxito!');
       setCitaAtendiendoId(null);
+      setCitaRecienAtendida({ id: cita.id, nombre: cita.pacientes?.nombre || 'el paciente' });
 
       const targetId = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
       if (targetId) cargarAgenda(targetId);
@@ -946,7 +1005,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                 {horariosManuales.length === 0 ? (
                   <p className="text-xs text-rose-500 font-bold py-2">No hay turnos configurados para esta fecha.</p>
                 ) : (
-                  <div className="grid grid-cols-4 gap-2 max-h-36 overflow-y-auto">
+                  <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-10 gap-2 max-h-36 overflow-y-auto">
                     {horariosManuales.map((h) => (
                       <button key={h} type="button" onClick={() => setHoraManualSeleccionada(h)} className={`p-2 text-xs font-bold rounded-xl border transition ${horaManualSeleccionada === h ? 'bg-blue-600 text-white border-blue-600 shadow' : 'bg-slate-50 hover:bg-slate-100 text-slate-700'}`}>{h}</button>
                     ))}
@@ -1203,6 +1262,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
 
       setRecetaParaImprimir(recetaObj);
       setCitaAtendiendoId(null);
+      setCitaRecienAtendida({ id: cita.id, nombre: cita.pacientes?.nombre || 'el paciente' });
 
       const targetId = esAdmin ? medicoSeleccionadoAdmin : perfilUsuario?.id;
       if (targetId) cargarAgenda(targetId);
@@ -1770,6 +1830,14 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
           >
             🔍 Buscar Expediente / Migración
           </button>
+          <button
+            onClick={() => setTabActiva('facturacion')}
+            className={`py-3 px-5 font-bold text-xs border-b-2 transition flex items-center gap-2 ${
+              tabActiva === 'facturacion' ? 'border-blue-600 text-blue-600 bg-blue-50/40 rounded-t-xl' : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            🧾 Facturación Electrónica
+          </button>
           <button 
             onClick={() => setTabActiva('horarios')} 
             className={`py-3 px-5 font-bold text-xs border-b-2 transition flex items-center gap-2 ${
@@ -1803,9 +1871,50 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
         {/* TAB: CONTROL DE CORREOS (solo admin) */}
         {esAdmin && tabActiva === 'correos' && <ReporteCorreos />}
 
+        {/* TAB: FACTURACIÓN ELECTRÓNICA */}
+        {tabActiva === 'facturacion' && (
+          <Facturacion
+            key={medicoAgendaId}
+            medicoId={medicoAgendaId}
+            citaInicialId={citaAFacturar}
+            onCitaInicialUsada={() => setCitaAFacturar(null)}
+            especialidad={
+              listaMedicos.find((m: { id: string }) => m.id === medicoAgendaId)?.especialidad ||
+              perfilUsuario?.especialidad
+            }
+          />
+        )}
+
         {/* TAB 1: CITAS ACTIVAS DEL DÍA */}
         {tabActiva === 'citas' && (
           <div className="space-y-4">
+            {citaRecienAtendida && (
+              <div className="flex justify-between items-center flex-wrap gap-3 p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs">
+                <span className="text-emerald-900 font-semibold">
+                  ✅ Consulta de <strong>{citaRecienAtendida.nombre}</strong> finalizada. ¿Desea emitir la factura ahora?
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCitaRecienAtendida(null)}
+                    className="text-[11px] font-bold text-slate-600 bg-white px-3 py-2 rounded-xl border border-slate-200 hover:bg-slate-50"
+                  >
+                    Más tarde
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCitaAFacturar(citaRecienAtendida.id);
+                      setCitaRecienAtendida(null);
+                      setTabActiva('facturacion');
+                    }}
+                    className="text-[11px] font-bold text-white bg-blue-600 hover:bg-blue-700 px-3.5 py-2 rounded-xl"
+                  >
+                    🧾 Facturar ahora
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="flex flex-col md:flex-row gap-3 justify-between bg-slate-50/80 p-4 rounded-2xl border border-slate-100">
               <input
                 type="text"
@@ -1934,9 +2043,16 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                       {/* HISTORIAL CLÍNICO INLINE */}
                       {historialVisibleCitaId === c.id && (
                         <div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-3">
-                          <h4 className="text-xs font-extrabold text-indigo-900 uppercase tracking-wider">
-                            📋 Historial Clínico de {c.pacientes.nombre}
-                          </h4>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <h4 className="text-xs font-extrabold text-indigo-900 uppercase tracking-wider">
+                              📋 Historial Clínico de {c.pacientes.nombre}
+                            </h4>
+                            {!loadingHistorialInline && (totalHistoriasPorCita[c.id] || 0) > 0 && (
+                              <span className="text-[11px] font-semibold text-indigo-700">
+                                {rangoAtenciones(paginaHistorial[c.id] || 0, (historiasPorCita[c.id] || []).length, totalHistoriasPorCita[c.id], HISTORIAL_POR_PAGINA)}
+                              </span>
+                            )}
+                          </div>
 
                           {loadingHistorialInline ? (
                             <p className="text-xs text-slate-500 py-3 text-center">Cargando historial...</p>
@@ -1944,7 +2060,8 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                             <p className="text-xs text-slate-500 py-2 italic">Este paciente no registra atenciones previas.</p>
                           ) : (
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                              <div className="space-y-2">
+                              <div className={`space-y-1.5 transition-opacity ${cargandoPaginaCitaId === c.id ? 'opacity-50' : ''}`}>
                                 {(historiasPorCita[c.id] || []).map((h) => {
                                   const sel = historiaSeleccionadaDetalle[c.id]?.id === h.id;
                                   return (
@@ -1959,6 +2076,15 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                                     </button>
                                   );
                                 })}
+                              </div>
+
+                              <PaginacionHistorial
+                                pagina={paginaHistorial[c.id] || 0}
+                                total={totalHistoriasPorCita[c.id] || 0}
+                                porPagina={HISTORIAL_POR_PAGINA}
+                                ocupado={cargandoPaginaCitaId === c.id}
+                                onCambiar={(p) => cargarPaginaHistorial(c.id, c.pacientes.id, p)}
+                              />
                               </div>
 
                               <div className="md:col-span-2 bg-white p-3.5 rounded-xl border border-indigo-100 text-xs space-y-2">
@@ -2149,7 +2275,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
 
         {/* TAB 2: AGENDAR CITA MANUAL */}
         {tabActiva === 'agendar_asistente' && (
-          <div className="max-w-xl mx-auto bg-slate-50/70 p-6 rounded-3xl border border-slate-200/80 space-y-4">
+          <div className="bg-slate-50/70 p-6 rounded-3xl border border-slate-200/80 space-y-4">
             <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">➕ Agendar Cita Manual</h3>
             
             {/* BUSCADOR INTUITIVO (Por Cédula o Nombres) */}
@@ -2238,9 +2364,11 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                       <p className="text-[11px] text-amber-700 mt-0.5">Complete los datos a continuación para registrarlo y agendar su cita:</p>
                     </div>
 
-                    <input type="text" placeholder="Nombre Completo" value={nombreNuevoPac} onChange={(e) => setNombreNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
-                    <input type="text" placeholder="Teléfono" value={telefonoNuevoPac} onChange={(e) => setTelefonoNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
-                    <input type="email" placeholder="Correo electrónico (para notificaciones)" value={emailNuevoPac} onChange={(e) => setEmailNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <input type="text" placeholder="Nombre Completo" value={nombreNuevoPac} onChange={(e) => setNombreNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
+                      <input type="text" placeholder="Teléfono" value={telefonoNuevoPac} onChange={(e) => setTelefonoNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
+                      <input type="email" placeholder="Correo electrónico (para notificaciones)" value={emailNuevoPac} onChange={(e) => setEmailNuevoPac(e.target.value)} className="w-full p-2.5 border rounded-xl text-xs bg-white font-medium" />
+                    </div>
 
                     {renderSelectorAgendamiento(true)}
                   </div>
@@ -2252,7 +2380,7 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
 
         {/* TAB 3: CONSULTAR EXPEDIENTE / MIGRACIÓN */}
         {tabActiva === 'consultar_expediente' && (
-          <div className="max-w-3xl mx-auto bg-slate-50/70 p-6 rounded-3xl border border-slate-200/80 space-y-6">
+          <div className="bg-slate-50/70 p-6 rounded-3xl border border-slate-200/80 space-y-6">
             <div className="flex justify-between items-center flex-wrap gap-3">
               <div className="space-y-1">
                 <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
@@ -2647,13 +2775,23 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                 )}
 
                 <div className="space-y-3">
-                  <h5 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">📋 Historial de Atenciones Médicas</h5>
-                  
-                  {historialConsultaLibre.length === 0 ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h5 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">📋 Historial de Atenciones Médicas</h5>
+                    {totalHistorialLibre > 0 && (
+                      <span className="text-[11px] font-semibold text-indigo-700">
+                        {rangoAtenciones(paginaHistorialLibre, historialConsultaLibre.length, totalHistorialLibre, HISTORIAL_POR_PAGINA)}
+                      </span>
+                    )}
+                  </div>
+
+                  {cargandoHistorialLibre && historialConsultaLibre.length === 0 ? (
+                    <p className="text-xs text-slate-500 py-4 text-center">Cargando historial...</p>
+                  ) : historialConsultaLibre.length === 0 ? (
                     <p className="text-xs text-slate-500 italic py-4 text-center">Este paciente no registra atenciones previas. Puede agregarlas usando el botón superior.</p>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                      <div className="space-y-2">
+                      <div className={`space-y-1.5 transition-opacity ${cargandoHistorialLibre ? 'opacity-50' : ''}`}>
                         {historialConsultaLibre.map((h) => {
                           const sel = historiaLibreSeleccionada?.id === h.id;
                           return (
@@ -2668,6 +2806,15 @@ Compártelo con tus pacientes por WhatsApp, correo o redes sociales.`);
                             </button>
                           );
                         })}
+                      </div>
+
+                      <PaginacionHistorial
+                        pagina={paginaHistorialLibre}
+                        total={totalHistorialLibre}
+                        porPagina={HISTORIAL_POR_PAGINA}
+                        ocupado={cargandoHistorialLibre}
+                        onCambiar={(p) => cargarHistorialLibre(pacienteConsultaLibre.id, p)}
+                      />
                       </div>
 
                       <div className="md:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs space-y-2.5">

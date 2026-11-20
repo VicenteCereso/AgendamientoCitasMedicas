@@ -148,7 +148,8 @@ if (!perfil) {
           id,
           nombre,
           cedula,
-          telefono
+          telefono,
+          email
         )
       `)
       .eq('medico_id', medicoId)
@@ -351,18 +352,23 @@ if (!perfil) {
     });
   },
 
- async obtenerHistorialPaciente(pacienteId: string, medicoId: string) {
-  if (!pacienteId || !medicoId) return [];
-  const { data, error } = await supabase
-    .from('historias_clinicas')
-    .select('*, medicos(nombre, especialidad, especialidades(tipo_atencion))')
-    .eq('paciente_id', pacienteId)
-    .eq('medico_id', medicoId)
-    .order('fecha_registro', { ascending: true });
+  // Una página del historial, de la atención más reciente a la más antigua.
+  // `pagina` empieza en 0 (0 = las más recientes). Devuelve también el total de atenciones.
+  async obtenerHistorialPagina(pacienteId: string, medicoId: string, pagina: number, tamano = 5) {
+    if (!pacienteId || !medicoId) return { historias: [], total: 0 };
+    const desde = pagina * tamano;
+    const { data, error, count } = await supabase
+      .from('historias_clinicas')
+      .select('*, medicos(nombre, especialidad, especialidades(tipo_atencion))', { count: 'exact' })
+      .eq('paciente_id', pacienteId)
+      .eq('medico_id', medicoId)
+      .order('fecha_registro', { ascending: false })
+      .order('id', { ascending: false }) // desempate estable para que no se repitan registros entre páginas
+      .range(desde, desde + tamano - 1);
 
-  if (error) throw error;
-  return data || [];
-},
+    if (error) throw error;
+    return { historias: data || [], total: count ?? 0 };
+  },
 
   // Diagnóstico único por paciente y psicólogo (se registra una vez y luego se edita)
   async obtenerDiagnosticoPaciente(pacienteId: string, medicoId: string) {
